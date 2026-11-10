@@ -90,6 +90,9 @@ repo's `eye.py`, `gc9a01.py`, and the strings in its UF2 firmware.
   I2C1 SCL, so if `A0`/`A1` are GP26/GP27 the connector is I²C-capable
   (`busio.I2C(scl=board.A1, sda=board.A0)`). Pull-ups must go to 3.3 V,
   not 5 V (RP2040 pins aren't 5 V tolerant).
+- **Display confirmed on hardware (2026-11-10, our 10.3.1 build):**
+  centered ring, correct rotation, red/green/blue in order, smooth
+  animation with the EyePi pins, init sequence, 62.5 MHz and rotation 180.
 - Defaults are the EyePi pins **regardless of firmware name**. On stock
   Pico firmware the EyePi reports itself as a Pico, so EyePi's own
   detect-by-name logic would pick the wrong pins. Allow overrides with `os.getenv()` from
@@ -184,6 +187,23 @@ and slower full-frame SPI pushes).
 - `runApp(width=240, height=240)`: `app.width == app.height == 240`.
   Other sizes raise `ValueError` (no scaling in v1).
 - CMU coordinates (origin top-left, y down) map 1:1 to pixels.
+- **Screen rotation (user request 2026-11-10):** an easy way to turn the
+  picture in 90° steps, for however the EyePi is mounted.
+  - Set in `CIRCUITPY/settings.toml`: `CMU_SCREEN_ROTATION = 90` (0, 90,
+    180, or 270, clockwise). 0 means upright as the EyePi is normally
+    held. The library adds it to the panel's base rotation (180 on the
+    EyePi, from `CMU_TFT_ROTATION`), so students never deal with the
+    panel's own numbers.
+  - Any other value stops the program at startup with a clear
+    `ValueError`.
+  - The screen is square, so `app.width`/`app.height` stay 240 and student
+    code doesn't change. `displayio` rotates in hardware, so it costs
+    nothing per frame.
+  - A settings file fits a physical setting: it stays with the board, and
+    student code still runs unchanged on desktop CMU. If changing it from
+    code turns out to be useful too, add a small extra function later
+    (e.g. `setScreenRotation(90)` in `onAppStart`), documented as
+    EyePi-only.
 - Helper constants or a note: the visible area is the circle centered at
   (120, 120) with radius 120. Consider `app.centerX`/`app.centerY`
   conveniences only if desktop CMU has them (don't add non-CMU API casually).

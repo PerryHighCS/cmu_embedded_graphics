@@ -89,9 +89,9 @@ In the serial console, record:
 
 | Check | EyePi 9.0.0-alpha firmware | EyePi CircuitPython 10.3.1 (our build) |
 |---|---|---|
-| Ring centered | | |
-| Rotation (square at top) | | |
-| Colors red/green/blue | | |
+| Ring centered | not checked | yes |
+| Rotation (square at top) | not checked | yes |
+| Colors red/green/blue | not checked | yes |
 | Display API used | old `displayio.FourWire/Display` | `fourwire`/`busdisplay` |
 | USB VID/PID | 2E8A / 1003 | 2E8A / 1003 |
 | A0 = GP26, A1 = GP27 | yes / yes | yes / yes |
