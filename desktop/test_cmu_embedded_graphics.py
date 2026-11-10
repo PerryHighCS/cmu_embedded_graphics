@@ -771,13 +771,14 @@ def test_image_swap_frees_unused_when_memory_is_short(tmp_path):
     assert cached == [[a], [b], [a], [b]]
 
 
-def test_image_falls_back_to_disk_when_too_big(tmp_path):
+def test_image_falls_back_to_disk_when_too_big(tmp_path, capsys):
     path = writeBmp(tmp_path / 'big.bmp', 20, 20)
     ceg.displayio.Bitmap.budget = 100
     d = draw(lambda: drawImage(path, 0, 0))
+    assert 'not enough memory' in capsys.readouterr().out
     group, = shapes(d)
     assert isinstance(group[0].bitmap, ceg.displayio.OnDiskBitmap)
-    assert group[0].pixel_shader == 'converter'
+    assert isinstance(group[0].pixel_shader, ceg.displayio.ColorConverter)
 
 
 def test_24bit_image_reads_from_disk(tmp_path):
@@ -791,35 +792,97 @@ def test_24bit_image_reads_from_disk(tmp_path):
     assert isinstance(shapes(d)[0][0].bitmap, ceg.displayio.OnDiskBitmap)
 
 
-def test_eye_example_blinks_with_two_images_of_memory(monkeypatch):
+def test_transparent_color_hides_matching_palette_entries(tmp_path):
+    palette = [(0, 0, 0)] * 256
+    palette[3] = (45, 255, 0)
+    palette[7] = (45, 255, 0)
+    palette[9] = (45, 255, 1)
+    path = writeBmp(tmp_path / 'k.bmp', 4, 4, palette=palette)
+    shaders = []
+
+    def onAppStart(app):
+        app.stepsPerSecond = 1000
+        app.n = 0
+
+    def onStep(app):
+        app.n += 1
+        if app.n == 3:
+            app.stop()
+
+    def redrawAll(app):
+        key = rgb(45, 255, 0) if app.n % 2 == 0 else None
+        drawImage(path, 0, 0, transparentColor=key)
+        shaders.append(ceg._runtime.renderer.slots[0].tiles.pixel_shader)
+
+    run(onAppStart=onAppStart, onStep=onStep, redrawAll=redrawAll)
+    keyed, plain = shaders[0], shaders[1]
+    assert keyed.transparent == {3, 7}
+    assert plain.transparent == set()
+    assert shaders[2] is keyed               # reused, not rebuilt
+    with pytest.raises(ValueError):
+        draw(lambda: drawImage(path, 0, 0, transparentColor='nope'))
+
+
+def test_transparent_color_on_24bit_uses_converter(tmp_path):
+    path = tmp_path / 'rgb.bmp'
+    data = bytes(2 * 4 * 2)
+    header = (b'BM' + struct.pack('<IHHI', 54 + len(data), 0, 0, 54)
+              + struct.pack('<IiiHHIIiiII', 40, 2, 2, 1, 24, 0, len(data),
+                            0, 0, 0, 0))
+    path.write_bytes(header + data)
+    d = draw(lambda: drawImage(str(path), 0, 0, transparentColor='lime'))
+    shader = shapes(d)[0][0].pixel_shader
+    assert shader.transparent == {0x00FF00}
+
+
+def test_eye_example_poses_fit_by_swapping_overlays(monkeypatch, capsys):
     import os
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    folder = os.path.join(root, 'examples', 'eye')
-    monkeypatch.chdir(folder)                 # images/... relative paths
-    ceg.displayio.Bitmap.budget = 2 * 240 * 240
+    monkeypatch.chdir(os.path.join(root, 'examples', 'eye'))
+    # Room for open.bmp plus two overlays, not all three (~150 KB board).
+    ceg.displayio.Bitmap.budget = 240 * 240 + 260 * 165 + 260 * 156
     source = open('code.py').read().replace('runApp()', '')
     g = {'__name__': 'eye'}
     exec(compile(source, 'code.py', 'exec'), g)
-    shown = []
+    loads = []
+    real = ceg._loadImage
+    monkeypatch.setattr(ceg, '_loadImage', lambda p, ram: loads.append(
+        (os.path.basename(p), ram)) or real(p, ram))
+    frames = []
 
     def redrawAll(app):
         g['redrawAll'](app)
-        image = ceg._runtime.renderer.slots[0].text
-        shown.append((os.path.basename(image.path),
-                      type(image.bitmap).__name__))
+        r = ceg._runtime.renderer
+        frames.append(tuple((os.path.basename(s.text.path),
+                             type(s.text.bitmap).__name__,
+                             s.shape.x, s.shape.y,
+                             sorted(s.tiles.pixel_shader.transparent))
+                            for s in r.slots[:r.count]))
 
     def onStep(app):
         g['onStep'](app)
-        if app.elapsedTime > 3:
+        if app.elapsedTime > 2:
             app.stop()
 
+    keys = [['space'], ['left'], ['right'], ['space'], ['left']]
+    batches = []
+    for k in keys:
+        batches += [k] + [[]] * 100
     supervisor.autoAdvance = 1
     ns = types.SimpleNamespace(onAppStart=g['onAppStart'], onStep=onStep,
                                onKeyPress=g['onKeyPress'],
                                redrawAll=redrawAll)
-    ceg._run(ns, FakeDisplay(), [FakeKeys([['space']])])
-    names = [n for n, _ in shown]
-    changes = [n for i, n in enumerate(names) if i == 0 or n != names[i - 1]]
-    assert changes == ['open.bmp', 'left.bmp', 'right.bmp', 'closed.bmp',
-                       'right.bmp', 'left.bmp', 'open.bmp']
-    assert {kind for _, kind in shown} == {'Bitmap'}   # never fell back
+    ceg._run(ns, FakeDisplay(), [FakeKeys(batches)])
+    opened = ('open.bmp', 'Bitmap', 0, 0, [])
+    overlays = [f[1][:2] for f in frames if len(f) == 2]
+    shown = [o for i, o in enumerate(overlays) if i == 0 or o != overlays[i - 1]]
+    assert shown == [('closedsm.bmp', 'Bitmap'), ('leftsm.bmp', 'Bitmap'),
+                     ('rightsm.bmp', 'Bitmap'), ('closedsm.bmp', 'Bitmap'),
+                     ('leftsm.bmp', 'Bitmap')]
+    assert all(f[0] == opened for f in frames)
+    assert ('rightsm.bmp', 'Bitmap', -10, 42, [254]) in [
+        f[1] for f in frames if len(f) == 2]
+    # Never fell back to the slow file drawing; overlays were reloaded.
+    assert all(ram for _, ram in loads)
+    assert loads.count(('closedsm.bmp', True)) >= 2
+    assert 'drawImage: not enough memory' not in capsys.readouterr().out

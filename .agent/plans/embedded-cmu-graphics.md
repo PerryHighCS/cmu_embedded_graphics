@@ -55,9 +55,16 @@ Since then (2026-11-10):
   pixel). 16/24-bit BMPs always use `OnDiskBitmap`. Scaling only by whole
   numbers; `opacity`/`rotateAngle` raise `ValueError`. JPEG (`jpegio`) and
   GIF (`gifio`) are in the firmware but not supported yet.
-- `examples/eye/`: the EyePi blinking eye, using the four 240x240 BMPs
-  from the EyePi repo as blink frames (`deploy eye`). Not yet run on
-  hardware.
+- `drawImage(..., transparentColor=...)`: EyePi-only keyword (desktop
+  CMU doesn't have it). Palette entries of exactly that color become
+  transparent (a copy of the palette per color, cached); 16/24-bit files
+  use a `ColorConverter`.
+- `examples/eye/code.py`: the EyePi blinking eye like the user's
+  `eye.py`: `open.bmp` full screen, `closedsm.bmp` (260x165, green
+  `#2DFF00` background) drawn over it with `transparentColor` to blink.
+  Both images stay in RAM (~100 KB). `examples/eye/eye.py` is the user's
+  original plain-displayio version (pre-CircuitPython 9 APIs, needs
+  `gc9a01.py` and `adafruit_imageload`). Not yet run on hardware.
 
 Next:
 1. On the PC with the board: `build deploy shapes`, check the screen

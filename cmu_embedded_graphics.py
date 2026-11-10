@@ -504,18 +504,21 @@ class Renderer:
                 child.hidden = True
         slot.geometry = pieces
 
-    def image(self, image, x, y, scale):
+    def image(self, image, shader, x, y, scale):
         slot = self.claim(IMAGE, None)
         group = slot.shape
         if slot.text is not image:
-            tiles = displayio.TileGrid(image.bitmap,
-                                       pixel_shader=image.shader)
+            tiles = displayio.TileGrid(image.bitmap, pixel_shader=shader)
             if slot.tiles is None:
                 group.append(tiles)
             else:
                 group[0] = tiles
             slot.tiles = tiles
             slot.text = image
+            slot.palette = shader
+        elif slot.palette is not shader:
+            slot.tiles.pixel_shader = shader
+            slot.palette = shader
         if slot.geometry != (x, y, scale):
             group.x = x
             group.y = y
@@ -573,6 +576,28 @@ class _Image:
         self.shader = shader
         self.width = width
         self.height = height
+        self.keyed = {}     # transparent color -> shader with it hidden
+
+    def shaderFor(self, transparent):
+        # The image's colors, with `transparent` (0xRRGGBB) see-through.
+        if transparent is None:
+            return self.shader
+        shader = self.keyed.get(transparent)
+        if shader is None:
+            source = self.shader
+            if isinstance(source, displayio.Palette):
+                shader = displayio.Palette(len(source))
+                for i in range(len(source)):
+                    color = source[i]
+                    shader[i] = color
+                    if color == transparent:
+                        shader.make_transparent(i)
+            else:
+                # 16/24-bit file: pixels are converted to 0xRRGGBB.
+                shader = displayio.ColorConverter()
+                shader.make_transparent(transparent)
+            self.keyed[transparent] = shader
+        return shader
 
 
 def _readBmpHeader(f, path):
@@ -827,6 +852,8 @@ class Runtime:
                     image = _loadImage(path, True)
                 except MemoryError:
                     gc.collect()
+                    print('drawImage: not enough memory for %r; drawing it '
+                          'from the file instead (slower)' % path)
                     image = _loadImage(path, False)
             self.images[path] = image
         self.imagesUsed.add(path)
@@ -1161,9 +1188,13 @@ def getImageSize(url):
 
 
 def drawImage(url, left, top, opacity=100, rotateAngle=0, align='left-top',
-              width=None, height=None, visible=True):
+              width=None, height=None, visible=True, transparentColor=None):
     # url is a BMP file on CIRCUITPY, e.g. 'images/cat.bmp'.
+    # transparentColor is EyePi-only (desktop CMU has no such option):
+    # pixels of exactly that color are not drawn, so what is under the
+    # image shows through. Exact matches work best with palette BMPs.
     runtime = _checkView('drawImage')
+    transparent = _toColor(transparentColor)
     for value, name in ((left, 'left'), (top, 'top'),
                         (rotateAngle, 'rotateAngle')):
         _number(value, name)
@@ -1184,7 +1215,8 @@ def drawImage(url, left, top, opacity=100, rotateAngle=0, align='left-top',
     w = image.width * scale
     h = image.height * scale
     dx, dy = _alignOffset(align, w, h)
-    runtime.renderer.image(image, _round(left - dx), _round(top - dy), scale)
+    runtime.renderer.image(image, image.shaderFor(transparent),
+                           _round(left - dx), _round(top - dy), scale)
 
 
 def _imageScale(image, width, height):

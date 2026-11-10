@@ -17,6 +17,17 @@ class Palette:
     def make_transparent(self, i):
         self.transparent.add(i)
 
+    def __len__(self):
+        return len(self.colors)
+
+
+class ColorConverter:
+    def __init__(self):
+        self.transparent = set()
+
+    def make_transparent(self, color):
+        self.transparent.add(color)
+
 
 class Group:
     def __init__(self, scale=1, x=0, y=0):
@@ -76,7 +87,7 @@ class OnDiskBitmap:
         self.path = path
         self.width, height = struct.unpack_from('<ii', header, 18)
         self.height = abs(height)
-        self.pixel_shader = 'converter'
+        self.pixel_shader = ColorConverter()
 
 
 class TileGrid:
