@@ -1,6 +1,36 @@
 # Plan: Embedded CMU Graphics for RP2040 + GC9A01 round display
 
-Status: draft · Created 2026-11-10
+Status: in progress · Created 2026-11-10
+
+## Status and next steps (handoff, 2026-11-10)
+
+Done:
+- Milestone 1 (display bring-up) on hardware, on both the original EyePi
+  firmware and our CircuitPython 10.3.1 EyePi build. See `docs/wiring.md`.
+- `boards/eyepi/` board definition; `tools/build_firmware.sh` +
+  `.github/workflows/eyepi-firmware.yml` build the UF2 on GitHub Actions
+  (both runs passed). The 10.3.1 build is flashed on the dev board, but the
+  build flashed there predates the `board.I2C()` fix (`cde87fb`). Not urgent.
+
+Next: **milestone 2 + 3, write `cmu_embedded_graphics.py`.**
+- Port cmu_playground's `App`, phases (`INTERNAL`/`CONTROLLER`/`VIEW`),
+  `MVCError`, `_ticksDiff`, and `Runtime.run()` loop: call `onAppStart`,
+  draw once, then loop; `stepsChanged` recomputes the step interval;
+  missed steps are skipped, not queued; redraw only when an event ran;
+  `app.running = False` ends the loop; `finally` cleans up.
+- Callbacks found by name on `__main__`; non-callable → `TypeError`.
+- Rename `updateAll` → `redrawAll`; replace LED/sound with the draw
+  functions and shape pool (§4.3); add `app.rotation` (§4.4) and serial
+  `onKeyPress` (§4.5).
+- Keep pure logic (colors, alignment, point math, `App` rules, step
+  timing) importable on desktop CPython so it can be unit-tested in the
+  codespace with fakes for `board`/`displayio`/`vectorio`/`supervisor`.
+
+Testing the hardware from a codespace: a codespace can't reach the board's
+USB. Either pull the repo on a PC with the board and copy files to
+`CIRCUITPY` (Windows helper: `tools/serial.ps1`), or use the browser editor
+at code.circuitpython.org (Web Serial). The dev board's console was COM29
+on the Windows PC.
 
 ## 1. Goal
 
