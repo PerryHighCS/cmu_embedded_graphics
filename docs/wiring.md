@@ -87,17 +87,22 @@ In the serial console, record:
 
 ### Results
 
-| Check | EyePi 9.0.0-alpha firmware | CircuitPython 10.x (Pico firmware) |
+| Check | EyePi 9.0.0-alpha firmware | EyePi CircuitPython 10.3.1 (our build) |
 |---|---|---|
 | Ring centered | | |
 | Rotation (square at top) | | |
 | Colors red/green/blue | | |
-| Display API used | old `displayio.FourWire/Display` | |
-| A0 = GP26, A1 = GP27 | yes / yes | |
-| `CIRCUITPY` size | 2.98 MB | |
-| Free RAM at start | 177,024 bytes | |
-| Free RAM while running | 175,920 bytes (steady, no leak) | |
-| FPS (one moving ball) | ~450 | |
+| Display API used | old `displayio.FourWire/Display` | `fourwire`/`busdisplay` |
+| USB VID/PID | 2E8A / 1003 | 2E8A / 1003 |
+| A0 = GP26, A1 = GP27 | yes / yes | yes / yes |
+| `CIRCUITPY` size | 2.98 MB | 2.98 MB (files kept after flashing) |
+| Free RAM at start | 177,024 bytes | 151,088 bytes |
+| Free RAM while running | 175,920 bytes (steady, no leak) | 150,000 bytes (steady, no leak) |
+| FPS (one moving ball) | ~450 | ~382 |
+
+On 10.3.1 the new `TFT_*`, `SDA` and `SCL` pin names all map to the right
+GPIOs. The first 10.3.1 build was missing `board.I2C()`; fixed in the next
+build.
 
 FPS here is high because only the ball's small area changes each frame
 (displayio sends only changed regions). A full-screen redraw will be much
