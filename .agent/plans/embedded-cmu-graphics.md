@@ -30,7 +30,7 @@ import line, apart from the smaller 240×240 canvas.
 
 | cmu_playground | This project |
 |---|---|
-| `App` with `__setattr__` guard, read-only `elapsedTime`, `stepsPerSecond`, `running` | Same, plus `width`, `height`, `paused`, `background` |
+| `App` with `__setattr__` guard, read-only `elapsedTime`, `stepsPerSecond`, `running` | Same, plus `width`, `height`, `paused`, `background`, `rotation` |
 | Phases `INTERNAL` / `CONTROLLER` / `VIEW` | Same; draw functions only allowed in `VIEW` (`redrawAll`) |
 | `updateAll(app)` view function | `redrawAll(app)` (CMU name) |
 | `Hardware` class wraps pins | `Display` (GC9A01 + displayio) and `Inputs` classes |
@@ -187,23 +187,25 @@ and slower full-frame SPI pushes).
 - `runApp(width=240, height=240)`: `app.width == app.height == 240`.
   Other sizes raise `ValueError` (no scaling in v1).
 - CMU coordinates (origin top-left, y down) map 1:1 to pixels.
-- **Screen rotation (user request 2026-11-10):** an easy way to turn the
-  picture in 90° steps, for however the EyePi is mounted.
-  - Set in `CIRCUITPY/settings.toml`: `CMU_SCREEN_ROTATION = 90` (0, 90,
-    180, or 270, clockwise). 0 means upright as the EyePi is normally
-    held. The library adds it to the panel's base rotation (180 on the
-    EyePi, from `CMU_TFT_ROTATION`), so students never deal with the
-    panel's own numbers.
-  - Any other value stops the program at startup with a clear
-    `ValueError`.
-  - The screen is square, so `app.width`/`app.height` stay 240 and student
-    code doesn't change. `displayio` rotates in hardware, so it costs
-    nothing per frame.
-  - A settings file fits a physical setting: it stays with the board, and
-    student code still runs unchanged on desktop CMU. If changing it from
-    code turns out to be useful too, add a small extra function later
-    (e.g. `setScreenRotation(90)` in `onAppStart`), documented as
-    EyePi-only.
+- **Screen rotation (decided 2026-11-10): a student option, `app.rotation`.**
+  Turns the picture in 90° steps, for however the EyePi is mounted.
+  - Students set `app.rotation = 90` in `onAppStart` (or any event
+    function, to change it while running). Values: 0, 90, 180, 270,
+    clockwise; default 0. 0 means upright as the EyePi is normally held.
+  - Works like `app.stepsPerSecond`: the `App` setter checks the value
+    (`TypeError` for non-integers, `ValueError` for anything but the four
+    angles; `MVCError` if set inside `redrawAll`). The runtime applies it
+    before the next redraw by setting
+    `display.rotation = (BASE + app.rotation) % 360`, where `BASE` is the
+    panel's own offset (180 on the EyePi, `CMU_TFT_ROTATION` override for
+    other hardware). Students never see the panel's numbers.
+  - The screen is square, so `app.width`/`app.height` stay 240 and the rest
+    of the program doesn't change. `displayio` rotates in hardware, so it
+    costs nothing per frame (a full redraw happens once when it changes).
+  - Desktop parity: desktop CMU lets programs set any attribute on `app`,
+    so `app.rotation = 90` is ignored there rather than crashing.
+  - No settings-file option for students; `settings.toml` is only for
+    wiring overrides.
 - Helper constants or a note: the visible area is the circle centered at
   (120, 120) with radius 120. Consider `app.centerX`/`app.centerY`
   conveniences only if desktop CMU has them (don't add non-CMU API casually).
@@ -265,7 +267,8 @@ a serial console still see something).
 ### Phase 1 (MVP)
 
 - `runApp()`, `app.stepsPerSecond`, `app.elapsedTime`, `app.running`,
-  `app.width`, `app.height`, `app.background`, `app.paused`.
+  `app.width`, `app.height`, `app.background`, `app.paused`,
+  `app.rotation`.
 - Callbacks: `onAppStart`, `redrawAll`, `onStep`, `onKeyPress` (from the
   serial console).
 - Draw: `drawRect`, `drawCircle`, `drawLine`, `drawLabel`.
