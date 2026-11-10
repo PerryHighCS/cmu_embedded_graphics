@@ -1,5 +1,7 @@
 # Copy to CIRCUITPY/settings.toml only if your screen is NOT wired like the
-# EyePi. These are the EyePi defaults.
+# EyePi. These pins are the Pico breadboard wiring from the EyePi repo; the
+# EyePi defaults (used when a setting is missing) are SCK GP18, MOSI GP19,
+# CS GP17, DC GP16, RST GP20, BL GP21.
 CMU_TFT_SCK = "GP10"
 CMU_TFT_MOSI = "GP11"
 CMU_TFT_CS = "GP9"
