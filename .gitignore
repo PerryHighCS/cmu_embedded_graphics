@@ -1,0 +1,9 @@
+# Build output
+firmware/
+*.mpy
+
+# Local backups of a board's CIRCUITPY drive
+.agent/backups/
+
+__pycache__/
+.vscode/

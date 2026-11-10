@@ -1,0 +1,50 @@
+name: Build EyePi firmware
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'boards/**'
+      - 'tools/build_firmware.sh'
+      - 'cmu_embedded_graphics.py'
+      - '.github/workflows/eyepi-firmware.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  firmware:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check out CircuitPython 10.3.1
+        uses: actions/checkout@v6
+        with:
+          repository: adafruit/circuitpython
+          ref: '10.3.1'
+          path: circuitpython
+          # Full history so the firmware reports its version from git tags.
+          fetch-depth: 0
+          submodules: false
+      - name: Install supported ARM compiler
+        uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          # Match CircuitPython 10.3.1's own CI toolchain.
+          release: '15.2.Rel1'
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gettext
+          python3 -m venv .venv
+          .venv/bin/pip install -r circuitpython/requirements-dev.txt
+      - name: Build EyePi firmware
+        run: |
+          source .venv/bin/activate
+          bash tools/build_firmware.sh circuitpython
+      - name: Upload firmware
+        uses: actions/upload-artifact@v7
+        with:
+          name: circuitpython-eyepi-10.3.1
+          path: firmware/circuitpython-eyepi-10.3.1.uf2
+          if-no-files-found: error
