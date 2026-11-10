@@ -215,24 +215,40 @@ def _rectPoints(left, top, width, height):
     return [(left, top), (right, top), (right, bottom), (left, bottom)]
 
 
-def _circlePoints(cx, cy, radius):
-    # Enough segments to look round at this size.
-    n = max(12, min(64, int(radius)))
+def _circlePoints(cx, cy, radius, n):
     step = 2 * math.pi / n
     return [(cx + radius * math.cos(i * step), cy + radius * math.sin(i * step))
             for i in range(n)]
 
 
-def _ring(outer, inner):
-    # One polygon for a hollow shape: walk the outer edge, cross to the
-    # inner edge and walk it backwards, so the middle is left empty.
-    pts = list(outer)
-    pts.append(outer[0])
-    pts.append(inner[0])
-    for i in range(len(inner) - 1, 0, -1):
-        pts.append(inner[i])
-    pts.append(inner[0])
-    return pts
+def _ringPieces(outer, inner, per):
+    # A hollow outline as several small polygons, `per` segments each.
+    # vectorio tests every pixel in a polygon's bounding box against every
+    # edge, so one big ring polygon is very slow; small pieces are not.
+    # Each piece reaches one segment into the next: a pixel exactly on a
+    # shared edge belongs to neither polygon, which would leave a gap.
+    n = len(outer)
+    pieces = []
+    for a in range(0, n, per):
+        b = min(a + per, n) + 1
+        pts = [outer[i % n] for i in range(a, b)]
+        for i in range(b - 1, a - 1, -1):
+            pts.append(inner[i % n])
+        pieces.append(_intPoints(pts))
+    return pieces
+
+
+def _rectOutline(left, top, width, height, half, cx, cy, degrees):
+    # Four border strips. Top and bottom span the full outer width, left
+    # and right the full outer height, so the corners overlap (no gaps).
+    l0 = left - half
+    t0 = top - half
+    w0 = width + 2 * half
+    h0 = height + 2 * half
+    b = 2 * half
+    strips = (_rectPoints(l0, t0, w0, b), _rectPoints(l0, t0 + h0 - b, w0, b),
+              _rectPoints(l0, t0, b, h0), _rectPoints(l0 + w0 - b, t0, b, h0))
+    return [_intPoints(_rotate(pts, cx, cy, degrees)) for pts in strips]
 
 
 def _intPoints(points):
@@ -320,6 +336,7 @@ RECT = 0
 CIRCLE = 1
 POLYGON = 2
 LABEL = 3
+PIECES = 4      # a Group of polygons in one color (hollow outlines)
 
 
 class _Slot:
@@ -387,10 +404,11 @@ class Renderer:
             shape = vectorio.Polygon(pixel_shader=palette,
                                      points=[(0, 0), (1, 0), (0, 1)],
                                      x=0, y=0)
+        elif kind == PIECES:
+            shape = displayio.Group()
         else:
             palette.make_transparent(0)
             shape = displayio.Group()
-            return _Slot(kind, shape, palette, None)
         return _Slot(kind, shape, palette)
 
     def claim(self, kind, color):
@@ -455,6 +473,32 @@ class Renderer:
         if slot.geometry != points:
             slot.shape.points = points
             slot.geometry = points
+
+    def pieces(self, pieces, color):
+        # pieces: list of point lists, drawn as one shape. Counts as one
+        # shape toward MAX_SHAPES.
+        slot = self.claim(PIECES, color)
+        old = slot.geometry
+        if old == pieces:
+            return
+        group = slot.shape
+        have = len(group)
+        for i in range(len(pieces)):
+            points = pieces[i]
+            if i < have:
+                child = group[i]
+                if old is None or i >= len(old) or old[i] != points:
+                    child.points = points
+                if child.hidden:
+                    child.hidden = False
+            else:
+                group.append(vectorio.Polygon(pixel_shader=slot.palette,
+                                              points=points, x=0, y=0))
+        for i in range(len(pieces), have):
+            child = group[i]
+            if not child.hidden:
+                child.hidden = True
+        slot.geometry = pieces
 
     def label(self, text, x, y, scale, color):
         slot = self.claim(LABEL, color)
@@ -848,9 +892,8 @@ def drawRect(left, top, width, height, fill='black', border=None,
         if innerW <= 0 or innerH <= 0:
             renderer.polygon(_intPoints(outer), border)
         else:
-            inner = _rotate(_rectPoints(left + half, top + half, innerW,
-                                        innerH), cx, cy, rotateAngle)
-            renderer.polygon(_intPoints(_ring(outer, inner)), border)
+            renderer.pieces(_rectOutline(left, top, width, height, half,
+                                         cx, cy, rotateAngle), border)
         return
     renderer.polygon(_intPoints(outer), border)
     if innerW > 0 and innerH > 0:
@@ -900,9 +943,11 @@ def drawCircle(centerX, centerY, radius, fill='black', border=None,
     elif inner < 1:
         renderer.circle(cx, cy, outer, border)
     else:
-        renderer.polygon(_intPoints(_ring(_circlePoints(cx, cy, outer),
-                                          _circlePoints(cx, cy, inner))),
-                         border)
+        # Enough segments to look round at this size, 4 per piece.
+        n = max(12, min(64, outer)) & ~3
+        renderer.pieces(_ringPieces(_circlePoints(cx, cy, outer, n),
+                                    _circlePoints(cx, cy, inner, n), 4),
+                        border)
 
 
 def drawLine(x1, y1, x2, y2, fill='black', lineWidth=2, opacity=100,

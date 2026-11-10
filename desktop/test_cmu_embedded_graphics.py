@@ -110,13 +110,30 @@ def test_rotate_clockwise():
     assert (round(x), round(y)) == (0, 10)   # y down: clockwise
 
 
-def test_ring_is_closed_keyhole():
-    outer = [(0, 0), (10, 0), (10, 10), (0, 10)]
-    inner = [(2, 2), (8, 2), (8, 8), (2, 8)]
-    pts = ceg._ring(outer, inner)
-    assert pts[:5] == outer + [outer[0]]
-    assert pts[5] == inner[0] and pts[-1] == inner[0]
-    assert pts[6:9] == [(2, 8), (8, 8), (8, 2)]
+def test_ring_pieces_overlap_and_wrap():
+    outer = [(i * 10, 0) for i in range(8)]
+    inner = [(i * 10, 5) for i in range(8)]
+    pieces = ceg._ringPieces(outer, inner, 4)
+    assert len(pieces) == 2
+    # Piece 0: outer 0..4, inner 4..0. Piece 1 wraps around to point 0.
+    assert pieces[0] == outer[0:5] + inner[4::-1]
+    assert pieces[1] == outer[4:8] + [outer[0]] + [inner[0]] + inner[7:3:-1]
+
+
+def _cost(poly):
+    # vectorio work for one polygon: pixels in its box * number of edges.
+    xs = [x for x, y in poly.points]
+    ys = [y for x, y in poly.points]
+    return (max(xs) - min(xs)) * (max(ys) - min(ys)) * len(poly.points)
+
+
+def test_hollow_circle_is_cheap_to_draw():
+    d = draw(lambda: drawCircle(120, 120, 110, fill=None, border='white'))
+    group, = shapes(d)
+    polys = [p for p in group.items if not p.hidden]
+    assert len(polys) == 16
+    # One keyhole polygon was ~220*220*131 = 6.3 million edge tests.
+    assert sum(_cost(p) for p in polys) < 250_000
 
 
 # ----------------------------------------------------------- App rules
@@ -349,9 +366,12 @@ def test_draw_rect_border_and_hollow():
     assert (inner.x, inner.y, inner.width, inner.color) == (12, 12, 16,
                                                             0xFF0000)
     d = draw(lambda: drawRect(10, 10, 20, 20, fill=None, border='blue'))
-    ring, = shapes(d)
-    assert isinstance(ring, vectorio.Polygon)
-    assert len(ring.points) == 10
+    outline, = shapes(d)
+    strips = outline.items
+    assert [len(p.points) for p in strips] == [4, 4, 4, 4]
+    xs = [x for p in strips for x, y in p.points]
+    ys = [y for p in strips for x, y in p.points]
+    assert (min(xs), max(xs), min(ys), max(ys)) == (9, 31, 9, 31)
 
 
 def test_draw_rect_rotated_is_polygon():
@@ -381,7 +401,9 @@ def test_draw_circle_variants():
     assert (outer.radius, inner.radius) == (22, 18)
     d = draw(lambda: drawCircle(50, 50, 20, fill=None, border='red'))
     ring, = shapes(d)
-    assert isinstance(ring, vectorio.Polygon)
+    assert isinstance(ring, ceg.displayio.Group)
+    assert all(isinstance(p, vectorio.Polygon) for p in ring.items)
+    assert all(p.pixel_shader[0] == 0xFF0000 for p in ring.items)
 
 
 def test_draw_line():
@@ -579,3 +601,32 @@ def test_demo_code_py_runs():
     exec('runApp()', g)
     assert display.refreshes > 300
     assert display.rotations[-1] == 270      # 180 + one 'r' press
+
+
+def test_pieces_reuse_and_hide_extra_polygons():
+    def onAppStart(app):
+        app.stepsPerSecond = 1000
+        app.r = 60
+
+    def onStep(app):
+        app.r = 12 if app.r == 60 else 60
+        app.n = getattr(app, 'n', 0) + 1
+        if app.n == 2:
+            app.stop()
+
+    groups = []
+
+    class D(FakeDisplay):
+        def refresh(self):
+            super().refresh()
+            g = self.root_group.items[1]
+            groups.append((g, sum(1 for p in g.items if not p.hidden),
+                           len(g.items)))
+
+    run(D(), onAppStart=onAppStart, onStep=onStep,
+        redrawAll=lambda app: drawCircle(120, 120, app.r, fill=None,
+                                         border='red'))
+    (g0, vis0, n0), (g1, vis1, n1), (g2, vis2, n2) = groups
+    assert g0 is g1 is g2                  # same group reused
+    assert (vis0, vis1, vis2) == (15, 3, 15)
+    assert n1 == n0                        # small ring hides, not deletes
