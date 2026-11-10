@@ -37,22 +37,25 @@ make -C "$port_dir" BOARD="$BOARD" fetch-board-submodules
 # Frozen-module manifests can need micropython-lib; fetch just that.
 git -C "$cp_dir" submodule update --init --depth 1 -- lib/micropython-lib
 
-# Supplemental build config: frozen modules.
-build_config="$cp_dir/cmu_build_config"
-mkdir -p "$build_config"
-: > "$build_config/user_post_mpconfigport.mk"
+# Frozen modules. FROZEN_MPY_DIRS must be set in the board's .mk file:
+# py/circuitpy_mpconfig.mk decides whether to build frozen_content.o before
+# user_post_mpconfigport.mk is read, so setting it there links without the
+# frozen modules (undefined mp_frozen_names). Only the checkout's copy of
+# the board file is changed, so boards/eyepi stays buildable without it.
 if [[ -f "$project_dir/cmu_embedded_graphics.py" ]]; then
+    rm -rf "$cp_dir/cmu_frozen"
     mkdir -p "$cp_dir/cmu_frozen"
     # Freeze the source with the firmware's own mpy-cross.
     cp "$project_dir/cmu_embedded_graphics.py" "$cp_dir/cmu_frozen/"
-    echo 'FROZEN_MPY_DIRS += $(TOP)/cmu_frozen' >> "$build_config/user_post_mpconfigport.mk"
+    printf '\n# Added by tools/build_firmware.sh\nFROZEN_MPY_DIRS += $(TOP)/cmu_frozen\n' \
+        >> "$port_dir/boards/$BOARD/mpconfigboard.mk"
     echo 'Freezing cmu_embedded_graphics.py'
 else
     echo 'cmu_embedded_graphics.py not found; building without frozen modules'
 fi
 
 make -C "$cp_dir/mpy-cross" -j"$(nproc)"
-make -C "$port_dir" -I "$build_config" BOARD="$BOARD" -j"$(nproc)"
+make -C "$port_dir" BOARD="$BOARD" -j"$(nproc)"
 
 out="$project_dir/firmware/circuitpython-$BOARD-$CP_VERSION.uf2"
 mkdir -p "$project_dir/firmware"
