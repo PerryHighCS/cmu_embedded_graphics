@@ -38,6 +38,46 @@ class Group:
     def __len__(self):
         return len(self.items)
 
+    def pop(self, i=-1):
+        return self.items.pop(i)
+
+
+class Bitmap:
+    # Raises MemoryError past `budget` bytes in total, to test fallbacks.
+    budget = None
+    allocated = 0
+
+    def __init__(self, width, height, value_count):
+        size = width * height
+        if Bitmap.budget is not None and Bitmap.allocated + size > Bitmap.budget:
+            raise MemoryError('fake out of memory')
+        Bitmap.allocated += size
+        import weakref
+        weakref.finalize(self, Bitmap._free, size)
+        self.width = width
+        self.height = height
+        self.value_count = value_count
+        self.pixels = [0] * size
+
+    @staticmethod
+    def _free(size):
+        Bitmap.allocated -= size
+
+    def __getitem__(self, xy):
+        x, y = xy
+        return self.pixels[y * self.width + x]
+
+
+class OnDiskBitmap:
+    def __init__(self, path):
+        import struct
+        with open(path, 'rb') as f:
+            header = f.read(54)
+        self.path = path
+        self.width, height = struct.unpack_from('<ii', header, 18)
+        self.height = abs(height)
+        self.pixel_shader = 'converter'
+
 
 class TileGrid:
     def __init__(self, bitmap, pixel_shader, width=1, height=1,

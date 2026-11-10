@@ -4,6 +4,7 @@ rem
 rem   deploy            copy cmu_embedded_graphics.mpy and code.py to D:
 rem   deploy test       ... but install tests\test_basic.py as code.py
 rem   deploy shapes     ... but install tests\test_shapes.py as code.py
+rem   deploy eye        ... but install the blinking eye example and images
 rem
 rem Set CIRCUITPY to use a drive other than D:, e.g.  set CIRCUITPY=E:
 rem
@@ -27,6 +28,11 @@ if exist "%CIRCUITPY%\cmu_embedded_graphics.py" (
 set APP=code.py
 if /i "%1"=="test" set APP=tests\test_basic.py
 if /i "%1"=="shapes" set APP=tests\test_shapes.py
+if /i "%1"=="eye" (
+    set APP=examples\eye\code.py
+    if not exist "%CIRCUITPY%\images" mkdir "%CIRCUITPY%\images"
+    copy /y examples\eye\images\*.bmp "%CIRCUITPY%\images\" >nul || exit /b 1
+)
 
 copy /y cmu_embedded_graphics.mpy "%CIRCUITPY%\cmu_embedded_graphics.mpy" >nul || exit /b 1
 copy /y "%APP%" "%CIRCUITPY%\code.py" >nul || exit /b 1

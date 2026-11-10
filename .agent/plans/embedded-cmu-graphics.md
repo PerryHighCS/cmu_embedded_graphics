@@ -38,6 +38,27 @@ Done in code, **not yet run on hardware** (milestones 2 + 3, 2026-11-10):
 - Not yet compiled with `mpy-cross` 10.3.1 (couldn't run it in the
   codespace); `build.cmd` will show any MicroPython syntax problems.
 
+Since then (2026-11-10):
+- Hardware: the library runs on the board from the frozen firmware.
+  Firmware is now 93% of its 1020 KB flash area.
+- Hollow outlines are drawn as small overlapping polygon pieces in one
+  Group: vectorio tests every pixel in a polygon's bounding box against
+  every edge, so one big ring polygon made the first frame paint slowly.
+  Confirmed much faster on hardware. Use the same idea for big
+  ovals/stars/arcs in phase 2. Fallback if polygons are still slow: a
+  scanline fill patched into vectorio's Polygon.c in our firmware build.
+- `drawImage(url, left, top, ..., width, height)` and `getImageSize`
+  (moved up from phase 3), BMP only. 1/4/8-bit palette BMPs load into RAM
+  with `bitmaptools.readinto` and are cached by path; on `MemoryError`,
+  images not drawn this frame are dropped and the load retried, then it
+  falls back to `displayio.OnDiskBitmap` (no RAM, slow: one file read per
+  pixel). 16/24-bit BMPs always use `OnDiskBitmap`. Scaling only by whole
+  numbers; `opacity`/`rotateAngle` raise `ValueError`. JPEG (`jpegio`) and
+  GIF (`gifio`) are in the firmware but not supported yet.
+- `examples/eye/`: the EyePi blinking eye, using the four 240x240 BMPs
+  from the EyePi repo as blink frames (`deploy eye`). Not yet run on
+  hardware.
+
 Next:
 1. On the PC with the board: `build deploy shapes`, check the screen
    against the list at the top of `tests/test_shapes.py`; then

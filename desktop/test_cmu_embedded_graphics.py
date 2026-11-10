@@ -630,3 +630,196 @@ def test_pieces_reuse_and_hide_extra_polygons():
     assert g0 is g1 is g2                  # same group reused
     assert (vis0, vis1, vis2) == (15, 3, 15)
     assert n1 == n0                        # small ring hides, not deletes
+
+
+# --------------------------------------------------------------- Images
+
+import struct
+
+from cmu_embedded_graphics import drawImage, getImageSize
+
+
+def writeBmp(path, width, height, bpp=8, rows=None, palette=None):
+    # Bottom-up palette BMP. rows: list of rows (top first) of indices.
+    colors = 1 << bpp
+    palette = palette or [(i, i, i) for i in range(colors)]
+    rows = rows or [[(x + y) % colors for x in range(width)]
+                    for y in range(height)]
+    stride = ((width * bpp + 31) // 32) * 4
+    data = b''
+    for row in reversed(rows):
+        bits = 0
+        line = bytearray(stride)
+        for x, v in enumerate(row):
+            bit = x * bpp
+            line[bit // 8] |= v << (8 - bpp - bit % 8)
+        data += bytes(line)
+    pal = b''.join(bytes((b, g, r, 0)) for r, g, b in palette)
+    offset = 54 + len(pal)
+    header = (b'BM' + struct.pack('<IHHI', offset + len(data), 0, 0, offset)
+              + struct.pack('<IiiHHIIiiII', 40, width, height, 1, bpp, 0,
+                            len(data), 2835, 2835, len(palette), 0))
+    with open(path, 'wb') as f:
+        f.write(header + pal + data)
+    return str(path)
+
+
+@pytest.fixture(autouse=True)
+def resetMemory():
+    ceg.displayio.Bitmap.budget = None
+    ceg.displayio.Bitmap.allocated = 0
+    yield
+    ceg.displayio.Bitmap.budget = None
+
+
+def test_image_loads_pixels_and_palette(tmp_path):
+    path = writeBmp(tmp_path / 'a.bmp', 3, 2, rows=[[1, 2, 3], [4, 5, 6]],
+                    palette=[(10, 20, 30)] * 1 + [(255, 0, 0)] * 255)
+    d = draw(lambda: drawImage(path, 100, 50))
+    group, = shapes(d)
+    tiles = group[0]
+    bitmap = tiles.bitmap
+    assert (bitmap.width, bitmap.height) == (3, 2)
+    assert [bitmap[x, 0] for x in range(3)] == [1, 2, 3]   # top row first
+    assert [bitmap[x, 1] for x in range(3)] == [4, 5, 6]
+    assert tiles.pixel_shader[0] == 0x0A141E
+    assert tiles.pixel_shader[1] == 0xFF0000
+    assert (group.x, group.y, group.scale) == (100, 50, 1)
+
+
+def test_image_4bit_and_align_and_scale(tmp_path):
+    path = writeBmp(tmp_path / 'b.bmp', 5, 4, bpp=4)
+    d = draw(lambda: drawImage(path, 120, 120, align='center', width=10))
+    group, = shapes(d)
+    assert group.scale == 2
+    assert (group.x, group.y) == (115, 116)
+    assert group[0].bitmap[4, 0] == 4
+
+
+def test_image_size_and_errors(tmp_path):
+    path = writeBmp(tmp_path / 'c.bmp', 7, 3)
+    assert getImageSize(path) == (7, 3)
+    for kwargs in (dict(width=10), dict(width=14, height=3),
+                   dict(width=3.5), dict(opacity=50), dict(rotateAngle=90)):
+        with pytest.raises(ValueError):
+            draw(lambda: drawImage(path, 0, 0, **kwargs))
+    with pytest.raises(ValueError, match='not found'):
+        draw(lambda: drawImage(str(tmp_path / 'missing.bmp'), 0, 0))
+    bad = tmp_path / 'x.png'
+    bad.write_bytes(b'\x89PNG' + bytes(60))
+    with pytest.raises(ValueError, match='only BMP'):
+        draw(lambda: drawImage(str(bad), 0, 0))
+    with pytest.raises(MVCError):
+        drawImage(path, 0, 0)
+
+
+def test_image_loaded_once_and_reused(tmp_path, monkeypatch):
+    path = writeBmp(tmp_path / 'd.bmp', 4, 4)
+    loads = []
+    real = ceg._loadImage
+    monkeypatch.setattr(ceg, '_loadImage',
+                        lambda p, ram: loads.append(p) or real(p, ram))
+
+    def onAppStart(app):
+        app.stepsPerSecond = 1000
+        app.n = 0
+
+    def onStep(app):
+        app.n += 1
+        if app.n == 5:
+            app.stop()
+
+    tiles = []
+
+    class D(FakeDisplay):
+        def refresh(self):
+            super().refresh()
+            tiles.append(self.root_group.items[1][0])
+
+    run(D(), onAppStart=onAppStart, onStep=onStep,
+        redrawAll=lambda app: drawImage(path, app.n, 0))
+    assert loads == [path]
+    assert all(t is tiles[0] for t in tiles)
+
+
+def test_image_swap_frees_unused_when_memory_is_short(tmp_path):
+    a = writeBmp(tmp_path / 'a.bmp', 10, 10)
+    b = writeBmp(tmp_path / 'b.bmp', 10, 10)
+    ceg.displayio.Bitmap.budget = 150        # room for one 10x10 image
+
+    def onAppStart(app):
+        app.stepsPerSecond = 1000
+        app.n = 0
+
+    def onStep(app):
+        app.n += 1
+        if app.n == 3:
+            app.stop()
+
+    kinds = []
+
+    def redrawAll(app):
+        drawImage(a if app.n % 2 == 0 else b, 0, 0)
+        img = ceg._runtime.renderer.slots[0].text
+        kinds.append(type(img.bitmap).__name__)
+        cached.append(sorted(ceg._runtime.images))
+
+    cached = []
+    run(onAppStart=onAppStart, onStep=onStep, redrawAll=redrawAll)
+    # Each swap dropped the other image and loaded this one into RAM.
+    assert kinds == ['Bitmap'] * 4
+    assert cached == [[a], [b], [a], [b]]
+
+
+def test_image_falls_back_to_disk_when_too_big(tmp_path):
+    path = writeBmp(tmp_path / 'big.bmp', 20, 20)
+    ceg.displayio.Bitmap.budget = 100
+    d = draw(lambda: drawImage(path, 0, 0))
+    group, = shapes(d)
+    assert isinstance(group[0].bitmap, ceg.displayio.OnDiskBitmap)
+    assert group[0].pixel_shader == 'converter'
+
+
+def test_24bit_image_reads_from_disk(tmp_path):
+    path = tmp_path / 'rgb.bmp'
+    data = bytes(2 * 4 * 2)     # 2x2, 24-bit, rows padded to 8 bytes
+    header = (b'BM' + struct.pack('<IHHI', 54 + len(data), 0, 0, 54)
+              + struct.pack('<IiiHHIIiiII', 40, 2, 2, 1, 24, 0, len(data),
+                            0, 0, 0, 0))
+    path.write_bytes(header + data)
+    d = draw(lambda: drawImage(str(path), 0, 0))
+    assert isinstance(shapes(d)[0][0].bitmap, ceg.displayio.OnDiskBitmap)
+
+
+def test_eye_example_blinks_with_two_images_of_memory(monkeypatch):
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    folder = os.path.join(root, 'examples', 'eye')
+    monkeypatch.chdir(folder)                 # images/... relative paths
+    ceg.displayio.Bitmap.budget = 2 * 240 * 240
+    source = open('code.py').read().replace('runApp()', '')
+    g = {'__name__': 'eye'}
+    exec(compile(source, 'code.py', 'exec'), g)
+    shown = []
+
+    def redrawAll(app):
+        g['redrawAll'](app)
+        image = ceg._runtime.renderer.slots[0].text
+        shown.append((os.path.basename(image.path),
+                      type(image.bitmap).__name__))
+
+    def onStep(app):
+        g['onStep'](app)
+        if app.elapsedTime > 3:
+            app.stop()
+
+    supervisor.autoAdvance = 1
+    ns = types.SimpleNamespace(onAppStart=g['onAppStart'], onStep=onStep,
+                               onKeyPress=g['onKeyPress'],
+                               redrawAll=redrawAll)
+    ceg._run(ns, FakeDisplay(), [FakeKeys([['space']])])
+    names = [n for n, _ in shown]
+    changes = [n for i, n in enumerate(names) if i == 0 or n != names[i - 1]]
+    assert changes == ['open.bmp', 'left.bmp', 'right.bmp', 'closed.bmp',
+                       'right.bmp', 'left.bmp', 'open.bmp']
+    assert {kind for _, kind in shown} == {'Bitmap'}   # never fell back

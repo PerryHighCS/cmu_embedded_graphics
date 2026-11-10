@@ -10,10 +10,13 @@
 # with a pool of reusable shapes: each draw call in redrawAll claims the
 # next slot, so nothing is allocated per frame once the pool has grown.
 
+import gc
 import math
 import os
+import struct
 import sys
 
+import bitmaptools
 import board
 import displayio
 import supervisor
@@ -21,7 +24,7 @@ import terminalio
 import vectorio
 
 __all__ = ('runApp', 'drawRect', 'drawCircle', 'drawLine', 'drawLabel',
-           'rgb', 'MVCError')
+           'drawImage', 'getImageSize', 'rgb', 'MVCError')
 
 CALLBACK_NAMES = ('onAppStart', 'redrawAll', 'onStep', 'onKeyPress')
 NEEDS_DPAD = ('onKeyRelease', 'onKeyHold')
@@ -337,6 +340,7 @@ CIRCLE = 1
 POLYGON = 2
 LABEL = 3
 PIECES = 4      # a Group of polygons in one color (hollow outlines)
+IMAGE = 5       # a Group holding a TileGrid of an image
 
 
 class _Slot:
@@ -344,10 +348,10 @@ class _Slot:
         self.kind = kind
         self.shape = shape      # what sits in the root group
         self.palette = palette
-        self.tiles = tiles      # LABEL only: the TileGrid inside shape
+        self.tiles = tiles      # LABEL, IMAGE: the TileGrid inside shape
         self.color = None
         self.geometry = None    # last geometry, to skip unchanged updates
-        self.text = None
+        self.text = None        # LABEL: text shown; IMAGE: _Image shown
         self.hidden = False
 
 
@@ -404,7 +408,7 @@ class Renderer:
             shape = vectorio.Polygon(pixel_shader=palette,
                                      points=[(0, 0), (1, 0), (0, 1)],
                                      x=0, y=0)
-        elif kind == PIECES:
+        elif kind == PIECES or kind == IMAGE:
             shape = displayio.Group()
         else:
             palette.make_transparent(0)
@@ -431,7 +435,7 @@ class Renderer:
             slot = self._make(kind)
             self.root.append(slot.shape)
             slots.append(slot)
-        if slot.color != color:
+        if slot.color != color and color is not None:
             slot.palette[1 if kind == LABEL else 0] = color
             slot.color = color
         return slot
@@ -500,6 +504,33 @@ class Renderer:
                 child.hidden = True
         slot.geometry = pieces
 
+    def image(self, image, x, y, scale):
+        slot = self.claim(IMAGE, None)
+        group = slot.shape
+        if slot.text is not image:
+            tiles = displayio.TileGrid(image.bitmap,
+                                       pixel_shader=image.shader)
+            if slot.tiles is None:
+                group.append(tiles)
+            else:
+                group[0] = tiles
+            slot.tiles = tiles
+            slot.text = image
+        if slot.geometry != (x, y, scale):
+            group.x = x
+            group.y = y
+            group.scale = scale
+            slot.geometry = (x, y, scale)
+
+    def dropImages(self, keep):
+        # Let go of images not drawn this frame so their memory can be freed.
+        for slot in self.slots:
+            if slot.kind == IMAGE and slot.tiles is not None \
+                    and slot.text.path not in keep:
+                slot.shape.pop()
+                slot.tiles = None
+                slot.text = None
+
     def label(self, text, x, y, scale, color):
         slot = self.claim(LABEL, color)
         group = slot.shape
@@ -531,6 +562,73 @@ class Renderer:
             group.y = y
             group.scale = scale
             slot.geometry = (x, y, scale)
+
+
+# -------------------------------------------------------------- Images
+
+class _Image:
+    def __init__(self, path, bitmap, shader, width, height):
+        self.path = path
+        self.bitmap = bitmap
+        self.shader = shader
+        self.width = width
+        self.height = height
+
+
+def _readBmpHeader(f, path):
+    # Returns (width, height, bitsPerPixel, compression, dataOffset,
+    # paletteOffset, colors). height < 0 means rows are stored top-down.
+    header = f.read(54)
+    if len(header) < 54 or header[0:2] != b'BM':
+        raise ValueError(path + ': only BMP images are supported')
+    (dataOffset, headerSize, width, height, planes, bpp,
+     compression) = struct.unpack_from('<IIiiHHI', header, 10)
+    colors = struct.unpack_from('<I', header, 46)[0]
+    return (width, height, bpp, compression, dataOffset, 14 + headerSize,
+            colors)
+
+
+def _openImage(path):
+    if not isinstance(path, str):
+        raise TypeError('image must be a file name: ' + repr(path))
+    try:
+        return open(path, 'rb')
+    except OSError:
+        raise ValueError('image not found: ' + repr(path))
+
+
+def _loadImage(path, inRam):
+    # 1-, 4- and 8-bit palette BMPs load into RAM (fast to draw). Others,
+    # or when inRam is False, are read from the file as they are drawn
+    # (no RAM, but slower).
+    f = _openImage(path)
+    try:
+        width, height, bpp, compression, dataOffset, paletteOffset, colors = \
+            _readBmpHeader(f, path)
+        rows = abs(height)
+        if not inRam or bpp not in (1, 4, 8) or compression != 0:
+            f.close()
+            f = None
+            bitmap = displayio.OnDiskBitmap(path)
+            return _Image(path, bitmap, bitmap.pixel_shader, bitmap.width,
+                          bitmap.height)
+        count = 1 << bpp
+        colors = min(colors or count, count)
+        f.seek(paletteOffset)
+        table = f.read(4 * colors)
+        palette = displayio.Palette(count)
+        for i in range(colors):
+            j = 4 * i
+            palette[i] = (table[j + 2] << 16) | (table[j + 1] << 8) | table[j]
+        bitmap = displayio.Bitmap(width, rows, count)
+        f.seek(dataOffset)
+        bitmaptools.readinto(bitmap, f, bits_per_pixel=bpp, element_size=4,
+                             reverse_pixels_in_element=True,
+                             reverse_rows=height > 0)
+        return _Image(path, bitmap, palette, width, rows)
+    finally:
+        if f is not None:
+            f.close()
 
 
 # ------------------------------------------------------------- Inputs
@@ -668,6 +766,8 @@ class Runtime:
         self.renderer = Renderer()
         self.inputs = [SerialKeys()] if inputs is None else inputs
         self.background = WHITE
+        self.images = {}            # path -> _Image, loaded on first draw
+        self.imagesUsed = set()     # paths drawn in the current frame
 
     # -- timing
 
@@ -702,6 +802,7 @@ class Runtime:
         self.background = background
         renderer = self.renderer
         renderer.begin(background)
+        self.imagesUsed.clear()
         if self.redrawAll is not None:
             self.phase = VIEW
             try:
@@ -712,6 +813,32 @@ class Runtime:
         if display.root_group is not renderer.root:
             display.root_group = renderer.root
         display.refresh()
+
+    def getImage(self, path):
+        image = self.images.get(path)
+        if image is None:
+            try:
+                image = _loadImage(path, True)
+            except MemoryError:
+                # Free images not drawn this frame, then try again; if it
+                # still does not fit, draw it straight from the file.
+                self.freeImages()
+                try:
+                    image = _loadImage(path, True)
+                except MemoryError:
+                    gc.collect()
+                    image = _loadImage(path, False)
+            self.images[path] = image
+        self.imagesUsed.add(path)
+        return image
+
+    def freeImages(self):
+        keep = self.imagesUsed
+        self.renderer.dropImages(keep)
+        for path in list(self.images):
+            if path not in keep:
+                del self.images[path]
+        gc.collect()
 
     def pollInputs(self):
         changed = False
@@ -1017,3 +1144,59 @@ def _labelAt(renderer, text, x, y, scale, color, align):
     dx, dy = _alignOffset(align, width, height)
     if text:
         renderer.label(text, _round(x - dx), _round(y - dy), scale, color)
+
+
+def getImageSize(url):
+    # (width, height) of a BMP file. Works anywhere, not just in redrawAll.
+    if _runtime is not None:
+        image = _runtime.images.get(url)
+        if image is not None:
+            return (image.width, image.height)
+    f = _openImage(url)
+    try:
+        width, height = _readBmpHeader(f, url)[:2]
+    finally:
+        f.close()
+    return (width, abs(height))
+
+
+def drawImage(url, left, top, opacity=100, rotateAngle=0, align='left-top',
+              width=None, height=None, visible=True):
+    # url is a BMP file on CIRCUITPY, e.g. 'images/cat.bmp'.
+    runtime = _checkView('drawImage')
+    for value, name in ((left, 'left'), (top, 'top'),
+                        (rotateAngle, 'rotateAngle')):
+        _number(value, name)
+    _checkCommon(opacity, False)
+    if opacity != 100:
+        raise ValueError('image opacity is not supported on the EyePi yet')
+    if rotateAngle % 360 != 0:
+        raise ValueError('images cannot be rotated on the EyePi yet')
+    for value, name in ((width, 'width'), (height, 'height')):
+        if value is not None:
+            _number(value, name)
+            if value <= 0:
+                raise ValueError('drawImage %s must be > 0' % name)
+    if not visible:
+        return
+    image = runtime.getImage(url)
+    scale = _imageScale(image, width, height)
+    w = image.width * scale
+    h = image.height * scale
+    dx, dy = _alignOffset(align, w, h)
+    runtime.renderer.image(image, _round(left - dx), _round(top - dy), scale)
+
+
+def _imageScale(image, width, height):
+    # The screen can only enlarge images by whole numbers (2x, 3x, ...).
+    if width is None and height is None:
+        return 1
+    sx = width / image.width if width is not None else None
+    sy = height / image.height if height is not None else None
+    scale = sx if sx is not None else sy
+    if (sx is not None and sy is not None and sx != sy) or scale < 1 \
+            or scale != int(scale):
+        raise ValueError('on the EyePi, images can only be drawn at their '
+                         'own size or 2x, 3x, ... (%dx%d)'
+                         % (image.width, image.height))
+    return int(scale)
