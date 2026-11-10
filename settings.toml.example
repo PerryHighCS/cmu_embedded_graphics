@@ -1,0 +1,12 @@
+# Copy to CIRCUITPY/settings.toml only if your screen is NOT wired like the
+# EyePi. These are the EyePi defaults; this example shows the Pico
+# breadboard wiring from the EyePi repo instead.
+CMU_TFT_SCK = "GP10"
+CMU_TFT_MOSI = "GP11"
+CMU_TFT_CS = "GP9"
+CMU_TFT_DC = "GP8"
+CMU_TFT_RST = "GP12"
+CMU_TFT_BL = "GP13"
+# Panel's own rotation (students use app.rotation instead).
+CMU_TFT_ROTATION = 180
+CMU_SPI_HZ = 62500000

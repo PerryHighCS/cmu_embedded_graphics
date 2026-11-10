@@ -12,19 +12,38 @@ Done:
   (both runs passed). The 10.3.1 build is flashed on the dev board, but the
   build flashed there predates the `board.I2C()` fix (`cde87fb`). Not urgent.
 
-Next: **milestone 2 + 3, write `cmu_embedded_graphics.py`.**
-- Port cmu_playground's `App`, phases (`INTERNAL`/`CONTROLLER`/`VIEW`),
-  `MVCError`, `_ticksDiff`, and `Runtime.run()` loop: call `onAppStart`,
-  draw once, then loop; `stepsChanged` recomputes the step interval;
-  missed steps are skipped, not queued; redraw only when an event ran;
-  `app.running = False` ends the loop; `finally` cleans up.
-- Callbacks found by name on `__main__`; non-callable → `TypeError`.
-- Rename `updateAll` → `redrawAll`; replace LED/sound with the draw
-  functions and shape pool (§4.3); add `app.rotation` (§4.4) and serial
-  `onKeyPress` (§4.5).
-- Keep pure logic (colors, alignment, point math, `App` rules, step
-  timing) importable on desktop CPython so it can be unit-tested in the
-  codespace with fakes for `board`/`displayio`/`vectorio`/`supervisor`.
+Done in code, **not yet run on hardware** (milestones 2 + 3, 2026-11-10):
+- `cmu_embedded_graphics.py`: `App`, phases, `MVCError`, `Runtime.run()`
+  ported from cmu_playground; serial `onKeyPress` (`SerialKeys`, arrow
+  escape sequences); `app.rotation`; shape pool renderer; `drawRect`,
+  `drawCircle`, `drawLine`, `drawLabel`; CSS color names; `rgb()`; error
+  screen. Demo `code.py` (bouncing ball), `settings.toml.example`,
+  `build.cmd` / `deploy.cmd`, on-device `tests/test_basic.py` (errors,
+  FPS, RAM) and `tests/test_shapes.py` (visual check).
+- Desktop tests: `pytest desktop` (fakes in `desktop/fakes/`). Run with
+  the `pytest` command, not `python -m pytest` from the repo root: the root
+  `code.py` would shadow Python's `code` module.
+- Changes from the plan below:
+  - Labels use a `displayio.TileGrid` over `terminalio.FONT` (one per pool
+    slot, reused), not `adafruit_display_text`. No extra library to deploy
+    or freeze.
+  - `stepsPerSecond` defaults to 30 and the background to white (desktop
+    CMU defaults). `app.stop()` is in already.
+  - Some phase 2 options were cheap and are done: `rotateAngle` on
+    `drawRect`/`drawLine`, `opacity` (blended with the background).
+    `dashes`, arrows and rotated labels raise `ValueError`; `font`, `bold`,
+    `italic`, label `border` are accepted and ignored.
+  - Hollow shapes (fill=None with a border) are one "keyhole" polygon.
+    Check on hardware that vectorio leaves no seam.
+- Not yet compiled with `mpy-cross` 10.3.1 (couldn't run it in the
+  codespace); `build.cmd` will show any MicroPython syntax problems.
+
+Next:
+1. On the PC with the board: `build deploy shapes`, check the screen
+   against the list at the top of `tests/test_shapes.py`; then
+   `build deploy test` and record the T1-T4 output (FPS, RAM) in
+   `docs/wiring.md`; then `build deploy` for the demo.
+2. Milestone 4: student `README.md` (API reference + error table).
 
 Testing the hardware from a codespace: a codespace can't reach the board's
 USB. Either pull the repo on a PC with the board and copy files to
