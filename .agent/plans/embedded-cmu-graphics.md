@@ -62,9 +62,44 @@ Since then (2026-11-10):
 - `examples/eye/code.py`: the EyePi blinking eye like the user's
   `eye.py`: `open.bmp` full screen, `closedsm.bmp` (260x165, green
   `#2DFF00` background) drawn over it with `transparentColor` to blink.
-  Both images stay in RAM (~100 KB). `examples/eye/eye.py` is the user's
-  original plain-displayio version (pre-CircuitPython 9 APIs, needs
-  `gc9a01.py` and `adafruit_imageload`). Not yet run on hardware.
+  Both images stay in RAM (~100 KB). Blink only: the EyePi repo's
+  `leftsm`/`rightsm` glance overlays were tried and dropped (pale fringe
+  around the lids).
+
+- Rest of the CS3 API (2026-11-10), checked against desktop
+  `cmu_graphics` 3.0.1's source (signatures, defaults, geometry):
+  - `drawOval`, `drawArc` (pie slice; CS3-mode angles: 0 = 3 o'clock,
+    counterclockwise, sweep 0-360), `drawPolygon(x1, y1, ...)` (no align,
+    rotates about its area centroid), `drawRegularPolygon` (first point at
+    12 o'clock), `drawStar` (default roundness 38.2 below 6 points, else
+    57.7; minimum 5), line `arrowStart`/`arrowEnd` (desktop sizes).
+  - `align` now defaults to None like desktop: a shape only moves when
+    align is given, using its box after rotation.
+  - Big fills are cut into 16 px horizontal strips (`_fillPieces`) so no
+    polygon has a big box; strips meet on whole rows (no gaps/overlaps,
+    checked with a copy of vectorio's pixel rule). Borders are rings of
+    small mitered pieces (miter capped at 4 border widths).
+  - Screens: `runAppWithScreens`, `setActiveScreen`,
+    `screen_onScreenActivate`; global onStep/onKeyPress/redrawAll with
+    screens is an `MVCError`, like desktop.
+  - `gradient()` (drawn as its first color), `distance`, `angleTo`,
+    `getPointInDir`, `fromPythonAngle`, `toPythonAngle`, `rounded`,
+    `pythonRound`, `round` (raises, as on desktop), `almostEqual`,
+    `makeList`, `dsin`, `dcos`, and `choice`/`random`/`randrange`/`seed`
+    exported like desktop (so `import random` before the star import is
+    replaced by the function). `app.quit()`.
+  - `dashes` on lines and every border, like desktop: True = 5 on / 5
+    off, or a list of on/off lengths (odd lists repeat). Each dash is cut
+    from the mitered border outline, so corners stay clean; ends are
+    square; arrowheads stay solid; labels accept and ignore dashes.
+  - `app.brightness` (EyePi extra, 0-100, default 100): sets the
+    display's `brightness` (PWM backlight on GP21) before the next redraw.
+  - `tests/test_shapes.py` is three screens (basic, more, dashes; space
+    switches, r rotates).
+  - Still not supported (decided 2026-11-10, may revisit): rotated labels
+    and images (would use `bitmaptools.rotozoom`), image opacity (would
+    blend the palette); these raise ValueError. True gradients, label
+    fonts/bold/italic. The d-pad.
 
 Next:
 1. On the PC with the board: `build deploy shapes`, check the screen

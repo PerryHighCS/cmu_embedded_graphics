@@ -22,11 +22,22 @@ import displayio
 import supervisor
 import terminalio
 import vectorio
+from random import choice, random, randrange, seed
 
-__all__ = ('runApp', 'drawRect', 'drawCircle', 'drawLine', 'drawLabel',
-           'drawImage', 'getImageSize', 'rgb', 'MVCError')
+__all__ = (
+    # running the app
+    'runApp', 'runAppWithScreens', 'setActiveScreen', 'MVCError',
+    # drawing
+    'drawRect', 'drawCircle', 'drawOval', 'drawArc', 'drawLine',
+    'drawPolygon', 'drawRegularPolygon', 'drawStar', 'drawLabel',
+    'drawImage', 'getImageSize', 'rgb', 'gradient',
+    # helpers, as in desktop CMU Graphics
+    'distance', 'angleTo', 'getPointInDir', 'fromPythonAngle',
+    'toPythonAngle', 'rounded', 'pythonRound', 'round', 'almostEqual',
+    'makeList', 'dsin', 'dcos', 'choice', 'random', 'randrange', 'seed')
 
 CALLBACK_NAMES = ('onAppStart', 'redrawAll', 'onStep', 'onKeyPress')
+SCREEN_NAMES = ('redrawAll', 'onStep', 'onKeyPress')   # per-screen versions
 NEEDS_DPAD = ('onKeyRelease', 'onKeyHold')
 NO_MOUSE = ('onMousePress', 'onMouseRelease', 'onMouseDrag', 'onMouseMove')
 
@@ -139,11 +150,41 @@ def rgb(red, green, blue):
     return RGB((red << 16) | (green << 8) | blue)
 
 
+class Gradient:
+    # What gradient() returns. The screen can't draw gradients yet, so a
+    # gradient fill is drawn in its first color.
+    def __init__(self, colors, start):
+        self.colors = colors
+        self.start = start
+        self.value = _toColor(colors[0])
+
+    def __repr__(self):
+        return 'gradient(%s, start=%r)' % (
+            ', '.join(repr(c) for c in self.colors), self.start)
+
+
+def gradient(*colors, start='center'):
+    if len(colors) < 2:
+        raise ValueError('gradient needs at least 2 colors; you gave %d'
+                         % len(colors))
+    for color in colors:
+        if color is None or isinstance(color, Gradient):
+            raise ValueError('gradient colors must be names or rgb(...): '
+                             + repr(color))
+        _toColor(color)
+    if start not in _ALIGN:
+        raise ValueError('unknown gradient start ' + repr(start))
+    return Gradient(colors, start)
+
+
 def _toColor(color):
-    # Color name, rgb(...) or None -> 0xRRGGBB int, or None for no color.
+    # Color name, rgb(...), gradient(...) or None -> 0xRRGGBB int, or None
+    # for no color.
     if color is None:
         return None
     if isinstance(color, RGB):
+        return color.value
+    if isinstance(color, Gradient):
         return color.value
     if isinstance(color, str):
         value = _colorCache.get(color)
@@ -161,7 +202,8 @@ def _toColor(color):
             if len(_colorCache) < 32:
                 _colorCache[color] = value
         return value
-    raise ValueError('use a color name, rgb(...) or None: ' + repr(color))
+    raise ValueError('use a color name, rgb(...), gradient(...) or None: '
+                     + repr(color))
 
 
 def _blend(color, background, opacity):
@@ -176,6 +218,69 @@ def _blend(color, background, opacity):
         b = (background >> shift) & 0xFF
         out |= (b + _round((c - b) * opacity / 100)) << shift
     return out
+
+
+# ------------------------------------------------- Student math helpers
+# The same helpers desktop CMU Graphics gives students. Angles are in
+# degrees, clockwise from 12 o'clock, like the rest of CMU Graphics.
+
+pythonRound = round      # Python's own, before ours replaces it below
+
+
+def round(*args):
+    raise Exception("Use our rounded(n) instead of Python 3's round(n)\n"
+                    "  Python 3's round(n) does not work as one might "
+                    "expect!\n  If you still want Python 3's round, use "
+                    "pythonRound")
+
+
+def rounded(d):
+    # Round half away from zero: rounded(2.5) == 3, rounded(-2.5) == -3.
+    sign = 1 if d >= 0 else -1
+    d = abs(d)
+    n = int(d)
+    if d - n >= 0.5:
+        n += 1
+    return sign * n
+
+
+def almostEqual(x, y, epsilon=10e-7):
+    return abs(x - y) <= epsilon
+
+
+def makeList(rows, cols, value=None):
+    if rows < 0 or cols < 0:
+        raise ValueError('Both rows and cols must be >= 0')
+    return [[value for _ in range(cols)] for _ in range(rows)]
+
+
+def dsin(angle):
+    return math.sin(math.radians(angle))
+
+
+def dcos(angle):
+    return math.cos(math.radians(angle))
+
+
+def distance(x1, y1, x2, y2):
+    return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+
+
+def fromPythonAngle(radians):
+    return (90 - math.degrees(radians)) % 360
+
+
+def toPythonAngle(degrees):
+    return math.radians(90 - degrees) % (2 * math.pi)
+
+
+def angleTo(x1, y1, x2, y2):
+    return fromPythonAngle(math.atan2(y1 - y2, x2 - x1))
+
+
+def getPointInDir(x1, y1, degrees, d):
+    a = toPythonAngle(degrees)
+    return [x1 + d * math.cos(a), y1 - d * math.sin(a)]
 
 
 # ------------------------------------------------------ Geometry helpers
@@ -220,7 +325,8 @@ def _rectPoints(left, top, width, height):
 
 def _circlePoints(cx, cy, radius, n):
     step = 2 * math.pi / n
-    return [(cx + radius * math.cos(i * step), cy + radius * math.sin(i * step))
+    return [(cx + radius * math.cos(i * step),
+             cy + radius * math.sin(i * step))
             for i in range(n)]
 
 
@@ -723,6 +829,7 @@ class App:
         set(self, 'paused', False)
         set(self, 'background', None)
         set(self, 'rotation', 0)
+        set(self, 'brightness', 100)    # EyePi extra: backlight, 0-100
 
     def __setattr__(self, name, value):
         if _runtime is not None and _runtime.phase == VIEW:
@@ -743,6 +850,11 @@ class App:
                 raise TypeError('app.rotation must be 0, 90, 180 or 270')
             if value not in (0, 90, 180, 270):
                 raise ValueError('app.rotation must be 0, 90, 180 or 270')
+        elif name == 'brightness':
+            if not _isNumber(value):
+                raise TypeError('app.brightness must be a number 0 to 100')
+            if not 0 <= value <= 100:
+                raise ValueError('app.brightness must be 0 to 100')
         object.__setattr__(self, name, value)
 
     def __getattr__(self, name):
@@ -758,28 +870,44 @@ class App:
     def stop(self):
         self.running = False
 
+    def quit(self):
+        self.running = False
+
 
 # -------------------------------------------------------------- Runtime
 
+def _callback(namespace, name):
+    callback = getattr(namespace, name, None)
+    if callback is not None and not callable(callback):
+        raise TypeError(name + ' must be a function')
+    return callback
+
+
 class Runtime:
-    def __init__(self, namespace, display=None, inputs=None):
+    def __init__(self, namespace, display=None, inputs=None, screen=None):
         self.phase = INTERNAL
         self.stepsChanged = True
         self.lastTick = supervisor.ticks_ms()
         self.elapsedMs = 0
 
-        for name in NO_MOUSE:
-            if hasattr(namespace, name):
-                raise MVCError(name + ': the EyePi has no mouse')
-        for name in NEEDS_DPAD:
-            if hasattr(namespace, name):
-                print('Warning: %s needs the d-pad; it is not called yet'
-                      % name)
+        self.namespace = namespace
+        self.screen = None
+        self.initialScreen = screen
+        for attr in dir(namespace):
+            for name in NO_MOUSE:
+                if attr == name or attr.endswith('_' + name):
+                    raise MVCError(attr + ': the EyePi has no mouse')
+            for name in NEEDS_DPAD:
+                if attr == name or attr.endswith('_' + name):
+                    print('Warning: %s needs the d-pad; it is not called yet'
+                          % attr)
+        if screen is not None:
+            for name in SCREEN_NAMES:
+                if hasattr(namespace, name):
+                    raise MVCError('Do not define %s when using screens'
+                                   % name)
         for name in CALLBACK_NAMES:
-            callback = getattr(namespace, name, None)
-            if callback is not None and not callable(callback):
-                raise TypeError(name + ' must be a function')
-            setattr(self, name, callback)
+            setattr(self, name, _callback(namespace, name))
 
         self.app = App()
         if display is None:
@@ -788,6 +916,7 @@ class Runtime:
             self.baseRotation = display.rotation
         self.display = display
         self.rotation = None
+        self.brightness = None
         self.renderer = Renderer()
         self.inputs = [SerialKeys()] if inputs is None else inputs
         self.background = WHITE
@@ -806,6 +935,24 @@ class Runtime:
         now = supervisor.ticks_ms()
         return (self.elapsedMs + _ticksDiff(now, self.lastTick)) / 1000
 
+    # -- screens
+
+    def setScreen(self, screen):
+        # Use screen_redrawAll, screen_onStep, ... from now on, then call
+        # screen_onScreenActivate if it exists. Runs inside an event.
+        if not isinstance(screen, str) or not screen:
+            raise ValueError(repr(screen) + ' is not a valid screen')
+        namespace = self.namespace
+        if not hasattr(namespace, screen + '_redrawAll'):
+            raise ValueError("Screen '%s' requires '%s_redrawAll()'"
+                             % (screen, screen))
+        self.screen = screen
+        for name in SCREEN_NAMES:
+            setattr(self, name, _callback(namespace, screen + '_' + name))
+        activate = _callback(namespace, screen + '_onScreenActivate')
+        if activate is not None:
+            activate(self.app)
+
     # -- dispatch
 
     def callController(self, callback, *args):
@@ -821,6 +968,9 @@ class Runtime:
         if app.rotation != self.rotation:
             display.rotation = (self.baseRotation + app.rotation) % 360
             self.rotation = app.rotation
+        if app.brightness != self.brightness:
+            display.brightness = app.brightness / 100
+            self.brightness = app.brightness
         background = _toColor(app.background)
         if background is None:
             background = WHITE
@@ -906,6 +1056,9 @@ class Runtime:
         try:
             if self.onAppStart is not None:
                 self.callController(self.onAppStart)
+            if self.initialScreen is not None and self.screen is None:
+                self.callController(lambda app: self.setScreen(
+                    self.initialScreen))
             self.view()
 
             interval = 0
@@ -947,19 +1100,39 @@ class Runtime:
 
 # ------------------------------------------------------------ Public API
 
-def runApp(width=WIDTH, height=HEIGHT):
+def _checkSize(width, height):
     if width != WIDTH or height != HEIGHT:
         raise ValueError('the EyePi screen is %dx%d' % (WIDTH, HEIGHT))
+
+
+def runApp(width=WIDTH, height=HEIGHT):
+    _checkSize(width, height)
     import __main__
     _run(__main__)
 
 
-def _run(namespace, display=None, inputs=None):
+def runAppWithScreens(initialScreen, width=WIDTH, height=HEIGHT):
+    # Callbacks are named screen_redrawAll, screen_onStep, screen_onKeyPress
+    # and screen_onScreenActivate; onAppStart is shared by all screens.
+    _checkSize(width, height)
+    import __main__
+    _run(__main__, screen=initialScreen)
+
+
+def setActiveScreen(screen):
+    if _runtime is None:
+        raise MVCError('setActiveScreen: app not running')
+    if _runtime.phase != CONTROLLER:
+        raise MVCError('setActiveScreen: use in event functions only')
+    _runtime.setScreen(screen)
+
+
+def _run(namespace, display=None, inputs=None, screen=None):
     # runApp without the size check; tests pass a fake display and inputs.
     global _runtime
     if _runtime is not None:
         raise RuntimeError('runApp already running')
-    _runtime = Runtime(namespace, display, inputs)
+    _runtime = Runtime(namespace, display, inputs, screen)
     try:
         _runtime.run()
     finally:
@@ -980,11 +1153,33 @@ def _fillColor(fill, opacity, background):
 
 
 def _checkCommon(opacity, dashes):
+    # Returns the dash pattern (list of on/off lengths) or None.
     _number(opacity, 'opacity')
     if not 0 <= opacity <= 100:
         raise ValueError('opacity must be 0 to 100: ' + repr(opacity))
-    if dashes:
-        raise ValueError('dashes are not supported on the EyePi yet')
+    return _dashPattern(dashes)
+
+
+def _dashPattern(dashes):
+    # Like desktop CMU: True is 5 on, 5 off; a list gives on, off, on, ...
+    # lengths, and an odd-length list repeats so on/off keeps alternating.
+    if dashes is None or dashes is False:
+        return None
+    if dashes is True:
+        return [5, 5]
+    if not isinstance(dashes, (list, tuple)) or not dashes:
+        raise TypeError('dashes must be True, False or a list of lengths: '
+                        + repr(dashes))
+    for d in dashes:
+        if not _isNumber(d) or d < 0:
+            raise ValueError('dash lengths must be numbers >= 0: '
+                             + repr(dashes))
+    if sum(dashes) <= 0:
+        raise ValueError('dash lengths cannot all be 0: ' + repr(dashes))
+    pattern = list(dashes)
+    if len(pattern) % 2:
+        pattern = pattern + pattern
+    return pattern
 
 
 def _checkBorderWidth(borderWidth):
@@ -993,67 +1188,344 @@ def _checkBorderWidth(borderWidth):
         raise ValueError('borderWidth must be >= 0')
 
 
-def drawRect(left, top, width, height, fill='black', border=None,
-             borderWidth=2, opacity=100, rotateAngle=0, dashes=False,
-             align='left-top', visible=True):
-    runtime = _checkView('drawRect')
-    for value, name in ((left, 'left'), (top, 'top'), (width, 'width'),
-                        (height, 'height'), (rotateAngle, 'rotateAngle')):
+# ------------------------------------------------------ Polygon drawing
+
+BAND = 16             # height of the strips a big fill is cut into
+FILL_BUDGET = 30000   # box pixels * edges above which a fill is cut up
+MITER_LIMIT = 4       # longest border corner, in border widths
+
+
+def _dedupe(points):
+    out = []
+    for p in points:
+        if not out or p != out[-1]:
+            out.append(p)
+    while len(out) > 1 and out[0] == out[-1]:
+        out.pop()
+    return out
+
+
+def _clipY(points, y, below):
+    # The part of the polygon with y >= limit (below) or y <= limit.
+    out = []
+    for i in range(len(points)):
+        p = points[i - 1]
+        q = points[i]
+        pIn = p[1] >= y if below else p[1] <= y
+        qIn = q[1] >= y if below else q[1] <= y
+        if pIn != qIn:
+            # Same endpoint order either way, so neighbors agree exactly.
+            a, b = (p, q) if p < q else (q, p)
+            out.append((a[0] + (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]),
+                        y))
+        if qIn:
+            out.append(q)
+    return out
+
+
+def _fillPieces(points):
+    # A filled polygon as a list of int point lists. vectorio tests every
+    # pixel in a polygon's box against every edge, so a big polygon is cut
+    # into horizontal strips with small boxes. Strips meet on whole pixel
+    # rows, so there are no gaps or overlaps. Works for concave shapes too.
+    points = _dedupe(_intPoints(points))
+    if len(points) < 3:
+        return []
+    xs = [x for x, y in points]
+    ys = [y for x, y in points]
+    top = min(ys)
+    bottom = max(ys)
+    if (max(xs) - min(xs)) * (bottom - top) * len(points) <= FILL_BUDGET:
+        return [points]
+    pieces = []
+    for y0 in range(top, bottom, BAND):
+        band = _clipY(_clipY(points, y0, True), min(y0 + BAND, bottom),
+                      False)
+        band = _dedupe(_intPoints(band))
+        if len(band) >= 3:
+            pieces.append(band)
+    return pieces
+
+
+def _fill(renderer, points, color):
+    pieces = _fillPieces(points)
+    if len(pieces) == 1:
+        renderer.polygon(pieces[0], color)
+    elif pieces:
+        renderer.pieces(pieces, color)
+
+
+def _area2(points):
+    # Twice the signed area; > 0 means clockwise on the screen (y down).
+    total = 0
+    for i in range(len(points)):
+        x1, y1 = points[i - 1]
+        x2, y2 = points[i]
+        total += x1 * y2 - x2 * y1
+    return total
+
+
+def _normals(points, closed):
+    # Unit normal of each edge, pointing out of a closed shape.
+    sign = 1 if not closed or _area2(points) >= 0 else -1
+    n = len(points)
+    normals = []
+    for i in range(n if closed else n - 1):
+        x1, y1 = points[i]
+        x2, y2 = points[(i + 1) % n]
+        dx = x2 - x1
+        dy = y2 - y1
+        length = math.sqrt(dx * dx + dy * dy)
+        normals.append((sign * dy / length, -sign * dx / length))
+    return normals
+
+
+def _offsets(points, half, normals=None, closed=True):
+    # The outline grown and shrunk by `half`, with mitered corners (capped
+    # at MITER_LIMIT border widths for sharp points like star tips). For an
+    # open path the two ends are cut square.
+    if normals is None:
+        normals = _normals(points, closed)
+    n = len(points)
+    limit = MITER_LIMIT * 2 * half
+    outer = []
+    inner = []
+    for i in range(n):
+        if closed:
+            ax, ay = normals[i - 1]
+            bx, by = normals[i]
+        else:
+            ax, ay = normals[max(i - 1, 0)]
+            bx, by = normals[min(i, n - 2)]
+        denom = 1 + ax * bx + ay * by
+        if denom < 1e-6:            # the outline doubles back on itself
+            ox = ax * half
+            oy = ay * half
+        else:
+            ox = (ax + bx) * half / denom
+            oy = (ay + by) * half / denom
+        length = math.sqrt(ox * ox + oy * oy)
+        if length > limit:
+            ox *= limit / length
+            oy *= limit / length
+        x, y = points[i]
+        outer.append((x + ox, y + oy))
+        inner.append((x - ox, y - oy))
+    return outer, inner
+
+
+def _border(renderer, points, borderWidth, color, dashes=None):
+    # The border is centered on the outline, like desktop CMU: a ring of
+    # small pieces, each cut into strips if it is still big.
+    points = _dedupe(points)
+    if len(points) < 3 or borderWidth <= 0:
+        return
+    if dashes is not None:
+        _stroke(renderer, points, True, borderWidth, color, dashes)
+        return
+    outer, inner = _offsets(points, borderWidth / 2)
+    pieces = []
+    for piece in _ringPieces(outer, inner, 1 if len(points) <= 16 else 4):
+        pieces.extend(_fillPieces(piece))
+    if pieces:
+        renderer.pieces(pieces, color)
+
+
+def _dashIntervals(length, pattern):
+    # (start, end) distances along a path of `length` that are drawn.
+    out = []
+    pos = 0
+    i = 0
+    while pos < length:
+        on = pattern[i % len(pattern)]
+        off = pattern[(i + 1) % len(pattern)]
+        if on > 0:
+            out.append((pos, min(pos + on, length)))
+        pos += on + off
+        i += 2
+    return out
+
+
+def _stroke(renderer, points, closed, width, color, dashes):
+    # A dashed stroke along points (a closed outline or an open line).
+    # Each dash is the piece of the mitered outline between two distances,
+    # so dashes keep proper corners; dash ends are cut square.
+    path = list(points)
+    if closed:
+        path.append(points[0])
+    normals = _normals(points, closed)
+    outer, inner = _offsets(points, width / 2, normals, closed)
+    n = len(points)
+    cum = [0]
+    for i in range(len(path) - 1):
+        (x1, y1), (x2, y2) = path[i], path[i + 1]
+        cum.append(cum[-1] + math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2))
+    half = width / 2
+
+    def at(d, side, after):
+        # Point at distance d along the path, pushed to one side. At a
+        # corner, a dash start uses the edge after it, a dash end the one
+        # before.
+        i = 0
+        while i < len(cum) - 2 and (cum[i + 1] <= d if after
+                                    else cum[i + 1] < d):
+            i += 1
+        span = cum[i + 1] - cum[i]
+        t = (d - cum[i]) / span if span else 0
+        (x1, y1), (x2, y2) = path[i], path[i + 1]
+        nx, ny = normals[i % len(normals)]
+        return (x1 + (x2 - x1) * t + side * nx * half,
+                y1 + (y2 - y1) * t + side * ny * half)
+
+    pieces = []
+    for start, end in _dashIntervals(cum[-1], dashes):
+        if end <= start:
+            continue
+        top = [at(start, 1, True)]
+        bottom = [at(start, -1, True)]
+        for k in range(1, len(path) - 1):
+            if start < cum[k] < end:
+                top.append(outer[k % n])
+                bottom.append(inner[k % n])
+        top.append(at(end, 1, False))
+        bottom.append(at(end, -1, False))
+        bottom.reverse()
+        pieces.extend(_fillPieces(top + bottom))
+    if pieces:
+        renderer.pieces(pieces, color)
+
+
+def _polygonShape(renderer, points, fill, border, borderWidth, dashes=None):
+    if fill is not None:
+        _fill(renderer, points, fill)
+    if border is not None:
+        _border(renderer, points, borderWidth, border, dashes)
+
+
+def _place(points, align, x, y, cx, cy):
+    # Desktop CMU moves a shape only when align is given: the named side
+    # of its box after rotation ('left', 'right', 'top', 'bottom'), else
+    # its center, goes to (x, y).
+    if align is None:
+        return points
+    _alignOffset(align, 0, 0)       # checks the name
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    if 'left' in align:
+        dx = x - min(xs)
+    elif 'right' in align:
+        dx = x - max(xs)
+    else:
+        dx = x - cx
+    if 'top' in align:
+        dy = y - min(ys)
+    elif 'bottom' in align:
+        dy = y - max(ys)
+    else:
+        dy = y - cy
+    return [(px + dx, py + dy) for px, py in points]
+
+
+def _boxCenter(points):
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    return (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+
+
+def _centroid(points):
+    # Area centroid, as desktop CMU rotates polygons about it.
+    a = _area2(points)
+    if a == 0:
+        n = len(points)
+        return (sum(p[0] for p in points) / n, sum(p[1] for p in points) / n)
+    cx = cy = 0
+    for i in range(len(points)):
+        x1, y1 = points[i - 1]
+        x2, y2 = points[i]
+        cross = x1 * y2 - x2 * y1
+        cx += (x1 + x2) * cross
+        cy += (y1 + y2) * cross
+    return cx / (3 * a), cy / (3 * a)
+
+
+def _ovalSegments(a, b):
+    # About one segment per 5 pixels of edge, a multiple of 4.
+    n = int(math.pi * (a + b) / 5)
+    return max(12, min(96, n)) & ~3
+
+
+def _ovalPoints(cx, cy, a, b, n):
+    step = 2 * math.pi / n
+    return [(cx + a * math.cos(i * step), cy + b * math.sin(i * step))
+            for i in range(n)]
+
+
+# --------------------------------------------------------- Draw functions
+
+def _checkShape(runtime, values, borderWidth, opacity, dashes):
+    # Checks the arguments; returns the dash pattern or None.
+    for value, name in values:
         _number(value, name)
-    if width < 0 or height < 0:
-        raise ValueError('drawRect width and height must be >= 0')
     _checkBorderWidth(borderWidth)
-    _checkCommon(opacity, dashes)
+    return _checkCommon(opacity, dashes)
+
+
+def _colors(runtime, fill, border, borderWidth, opacity):
     background = runtime.background
     fill = _fillColor(fill, opacity, background)
     border = _fillColor(border, opacity, background)
-    if not visible:
-        return
     if borderWidth == 0:
         border = None
-    dx, dy = _alignOffset(align, width, height)
-    left -= dx
-    top -= dy
+    return fill, border
+
+
+def drawRect(left, top, width, height, fill='black', border=None,
+             borderWidth=2, opacity=100, rotateAngle=0, dashes=False,
+             align=None, visible=True):
+    runtime = _checkView('drawRect')
+    dashes = _checkShape(
+        runtime, ((left, 'left'), (top, 'top'), (width, 'width'),
+                  (height, 'height'), (rotateAngle, 'rotateAngle')),
+        borderWidth, opacity, dashes)
+    if width < 0 or height < 0:
+        raise ValueError('drawRect width and height must be >= 0')
+    fill, border = _colors(runtime, fill, border, borderWidth, opacity)
+    if not visible:
+        return
     renderer = runtime.renderer
-    half = borderWidth / 2 if border is not None else 0
-    rotated = rotateAngle % 360 != 0
-
-    if not rotated:
-        if border is not None and fill is not None:
-            _rect(renderer, left - half, top - half, width + 2 * half,
-                  height + 2 * half, border)
-            _rect(renderer, left + half, top + half, width - 2 * half,
-                  height - 2 * half, fill)
-            return
-        if fill is not None:
-            _rect(renderer, left, top, width, height, fill)
-            return
-        if border is None:
-            return
-
-    cx = left + width / 2
-    cy = top + height / 2
-    if border is None:
+    if rotateAngle % 360 != 0:
+        cx = left + width / 2
+        cy = top + height / 2
         pts = _rotate(_rectPoints(left, top, width, height), cx, cy,
                       rotateAngle)
-        renderer.polygon(_intPoints(pts), fill)
+        pts = _place(pts, align, left, top, cx, cy)
+        _polygonShape(renderer, pts, fill, border, borderWidth, dashes)
         return
-    outer = _rotate(_rectPoints(left - half, top - half, width + 2 * half,
-                                height + 2 * half), cx, cy, rotateAngle)
-    innerW = width - 2 * half
-    innerH = height - 2 * half
-    if fill is None:
-        if innerW <= 0 or innerH <= 0:
-            renderer.polygon(_intPoints(outer), border)
-        else:
-            renderer.pieces(_rectOutline(left, top, width, height, half,
-                                         cx, cy, rotateAngle), border)
-        return
-    renderer.polygon(_intPoints(outer), border)
-    if innerW > 0 and innerH > 0:
-        inner = _rotate(_rectPoints(left + half, top + half, innerW, innerH),
-                        cx, cy, rotateAngle)
-        renderer.polygon(_intPoints(inner), fill)
+    # Not rotated: Rectangles are the cheapest thing to draw.
+    if align is not None:
+        dx, dy = _alignOffset(align, width, height)
+        left -= dx
+        top -= dy
+    half = borderWidth / 2
+    if border is not None and dashes is not None:
+        if fill is not None:
+            _rect(renderer, left, top, width, height, fill)
+        _border(renderer, _rectPoints(left, top, width, height),
+                borderWidth, border, dashes)
+    elif border is None:
+        if fill is not None:
+            _rect(renderer, left, top, width, height, fill)
+    elif fill is not None:
+        _rect(renderer, left - half, top - half, width + 2 * half,
+              height + 2 * half, border)
+        _rect(renderer, left + half, top + half, width - 2 * half,
+              height - 2 * half, fill)
+    elif width - 2 * half <= 0 or height - 2 * half <= 0:
+        _rect(renderer, left - half, top - half, width + 2 * half,
+              height + 2 * half, border)
+    else:
+        renderer.pieces(_rectOutline(left, top, width, height, half,
+                                     0, 0, 0), border)
 
 
 def _rect(renderer, left, top, width, height, color):
@@ -1064,27 +1536,18 @@ def _rect(renderer, left, top, width, height, color):
                   color)
 
 
-def drawCircle(centerX, centerY, radius, fill='black', border=None,
-               borderWidth=2, opacity=100, rotateAngle=0, dashes=False,
-               align='center', visible=True):
-    runtime = _checkView('drawCircle')
-    for value, name in ((centerX, 'centerX'), (centerY, 'centerY'),
-                        (radius, 'radius'), (rotateAngle, 'rotateAngle')):
-        _number(value, name)
-    if radius < 0:
-        raise ValueError('drawCircle radius must be >= 0')
-    _checkBorderWidth(borderWidth)
-    _checkCommon(opacity, dashes)
-    background = runtime.background
-    fill = _fillColor(fill, opacity, background)
-    border = _fillColor(border, opacity, background)
-    if not visible:
+def _circleShape(renderer, cx, cy, radius, fill, border, borderWidth,
+                 dashes=None):
+    cx = _round(cx)
+    cy = _round(cy)
+    if border is not None and dashes is not None:
+        if fill is not None:
+            renderer.circle(cx, cy, _round(radius), fill)
+        _border(renderer, _circlePoints(cx, cy, radius,
+                                        _ovalSegments(radius, radius)),
+                borderWidth, border, dashes)
         return
-    dx, dy = _alignOffset(align, 2 * radius, 2 * radius)
-    cx = _round(centerX - dx + radius)
-    cy = _round(centerY - dy + radius)
-    renderer = runtime.renderer
-    if border is None or borderWidth <= 0:
+    if border is None:
         if fill is not None:
             renderer.circle(cx, cy, _round(radius), fill)
         return
@@ -1104,6 +1567,181 @@ def drawCircle(centerX, centerY, radius, fill='black', border=None,
                         border)
 
 
+def drawCircle(centerX, centerY, radius, fill='black', border=None,
+               borderWidth=2, opacity=100, rotateAngle=0, dashes=False,
+               align=None, visible=True):
+    runtime = _checkView('drawCircle')
+    dashes = _checkShape(
+        runtime, ((centerX, 'centerX'), (centerY, 'centerY'),
+                  (radius, 'radius'), (rotateAngle, 'rotateAngle')),
+        borderWidth, opacity, dashes)
+    if radius < 0:
+        raise ValueError('drawCircle radius must be >= 0')
+    fill, border = _colors(runtime, fill, border, borderWidth, opacity)
+    if not visible:
+        return
+    dx, dy = _alignOffset(align or 'center', 2 * radius, 2 * radius)
+    _circleShape(runtime.renderer, centerX - dx + radius,
+                 centerY - dy + radius, radius, fill, border, borderWidth,
+                 dashes)
+
+
+def drawOval(centerX, centerY, width, height, fill='black', border=None,
+             borderWidth=2, opacity=100, rotateAngle=0, dashes=False,
+             align=None, visible=True):
+    runtime = _checkView('drawOval')
+    dashes = _checkShape(runtime, ((centerX, 'centerX'), (centerY, 'centerY'),
+                                   (width, 'width'), (height, 'height'),
+                                   (rotateAngle, 'rotateAngle')),
+                         borderWidth, opacity, dashes)
+    if width < 0 or height < 0:
+        raise ValueError('drawOval width and height must be >= 0')
+    fill, border = _colors(runtime, fill, border, borderWidth, opacity)
+    if not visible or width == 0 or height == 0:
+        return
+    renderer = runtime.renderer
+    a = width / 2
+    b = height / 2
+    if width == height or rotateAngle % 360 == 0:
+        dx, dy = _alignOffset(align or 'center', width, height)
+        centerX += a - dx
+        centerY += b - dy
+        if width == height:
+            _circleShape(renderer, centerX, centerY, a, fill, border,
+                         borderWidth, dashes)
+            return
+        rotateAngle = 0
+        align = None
+    pts = _ovalPoints(centerX, centerY, a, b, _ovalSegments(a, b))
+    pts = _rotate(pts, centerX, centerY, rotateAngle)
+    pts = _place(pts, align, centerX, centerY, centerX, centerY)
+    _polygonShape(renderer, pts, fill, border, borderWidth, dashes)
+
+
+def drawArc(centerX, centerY, width, height, startAngle, sweepAngle,
+            fill='black', border=None, borderWidth=2, opacity=100,
+            rotateAngle=0, dashes=False, align=None, visible=True):
+    # A pie slice of an oval. As in desktop CMU's CS3 mode, angles are in
+    # degrees, starting at 3 o'clock and going counterclockwise.
+    runtime = _checkView('drawArc')
+    dashes = _checkShape(runtime, ((centerX, 'centerX'), (centerY, 'centerY'),
+                                   (width, 'width'), (height, 'height'),
+                                   (startAngle, 'startAngle'),
+                                   (sweepAngle, 'sweepAngle'),
+                                   (rotateAngle, 'rotateAngle')),
+                         borderWidth, opacity, dashes)
+    if width < 0 or height < 0:
+        raise ValueError('drawArc width and height must be >= 0')
+    if not 0 <= sweepAngle <= 360:
+        raise ValueError('sweepAngle must be 0 to 360: ' + repr(sweepAngle))
+    fill, border = _colors(runtime, fill, border, borderWidth, opacity)
+    if not visible or width == 0 or height == 0 or sweepAngle == 0:
+        return
+    a = width / 2
+    b = height / 2
+    n = max(3, int(_ovalSegments(a, b) * sweepAngle / 360) + 1)
+    start = math.radians(startAngle)
+    sweep = math.radians(sweepAngle)
+    pts = [(centerX, centerY)]
+    for i in range(n):
+        theta = start + sweep * i / (n - 1)
+        pts.append((centerX + a * math.cos(theta),
+                    centerY - b * math.sin(theta)))
+    pts = _rotate(pts, centerX, centerY, rotateAngle)
+    pts = _place(pts, align, centerX, centerY, centerX, centerY)
+    _polygonShape(runtime.renderer, pts, fill, border, borderWidth,
+                  dashes)
+
+
+def drawPolygon(*coords, fill='black', border=None, borderWidth=2,
+                opacity=100, rotateAngle=0, dashes=False, visible=True):
+    # drawPolygon(x1, y1, x2, y2, x3, y3, ...)
+    runtime = _checkView('drawPolygon')
+    if len(coords) % 2:
+        raise ValueError('drawPolygon needs pairs of numbers: x1, y1, ...')
+    for i in range(len(coords)):
+        _number(coords[i], 'polygon point')
+    dashes = _checkShape(runtime, ((rotateAngle, 'rotateAngle'),), borderWidth,
+                         opacity, dashes)
+    fill, border = _colors(runtime, fill, border, borderWidth, opacity)
+    if not visible or len(coords) < 6:
+        return
+    pts = [(coords[i], coords[i + 1]) for i in range(0, len(coords), 2)]
+    if rotateAngle % 360 != 0:
+        cx, cy = _centroid(pts)
+        pts = _rotate(pts, cx, cy, rotateAngle)
+    _polygonShape(runtime.renderer, pts, fill, border, borderWidth,
+                  dashes)
+
+
+def _checkPoints(points):
+    if not isinstance(points, int) or isinstance(points, bool):
+        raise TypeError('points must be a whole number: ' + repr(points))
+    if points < 3:
+        raise ValueError('points must be 3 or more: ' + repr(points))
+
+
+def _inDir(cx, cy, degrees, d):
+    # getPointInDir as a tuple: degrees clockwise from 12 o'clock.
+    a = math.radians(degrees)
+    return (cx + d * math.sin(a), cy - d * math.cos(a))
+
+
+def drawRegularPolygon(centerX, centerY, radius, points, fill='black',
+                       border=None, borderWidth=2, opacity=100,
+                       rotateAngle=0, dashes=False, align=None,
+                       visible=True):
+    runtime = _checkView('drawRegularPolygon')
+    dashes = _checkShape(
+        runtime, ((centerX, 'centerX'), (centerY, 'centerY'),
+                  (radius, 'radius'), (rotateAngle, 'rotateAngle')),
+        borderWidth, opacity, dashes)
+    _checkPoints(points)
+    if radius < 0:
+        raise ValueError('drawRegularPolygon radius must be >= 0')
+    fill, border = _colors(runtime, fill, border, borderWidth, opacity)
+    if not visible or radius == 0:
+        return
+    pts = [_inDir(centerX, centerY, i * 360 / points, radius)
+           for i in range(points)]
+    pts = _rotate(pts, centerX, centerY, rotateAngle)
+    pts = _place(pts, align, centerX, centerY, centerX, centerY)
+    _polygonShape(runtime.renderer, pts, fill, border, borderWidth,
+                  dashes)
+
+
+def drawStar(centerX, centerY, radius, points, fill='black', border=None,
+             borderWidth=2, opacity=100, rotateAngle=0, dashes=False,
+             align=None, visible=True, roundness=None):
+    # roundness (0-100) is the inner radius as a percent of radius.
+    runtime = _checkView('drawStar')
+    dashes = _checkShape(
+        runtime, ((centerX, 'centerX'), (centerY, 'centerY'),
+                  (radius, 'radius'), (rotateAngle, 'rotateAngle')),
+        borderWidth, opacity, dashes)
+    _checkPoints(points)
+    if radius < 0:
+        raise ValueError('drawStar radius must be >= 0')
+    if roundness is None:
+        roundness = 38.196601125 if points < 6 else 57.735026919
+    _number(roundness, 'roundness')
+    if not 0 <= roundness <= 100:
+        raise ValueError('roundness must be 0 to 100: ' + repr(roundness))
+    fill, border = _colors(runtime, fill, border, borderWidth, opacity)
+    if not visible or radius == 0:
+        return
+    inner = radius * max(5, roundness) / 100
+    step = 360 / points
+    pts = []
+    for i in range(points):
+        pts.append(_inDir(centerX, centerY, i * step, radius))
+        pts.append(_inDir(centerX, centerY, i * step + step / 2, inner))
+    pts = _rotate(pts, centerX, centerY, rotateAngle)
+    pts = _place(pts, align, centerX, centerY, centerX, centerY)
+    _polygonShape(runtime.renderer, pts, fill, border, borderWidth,
+                  dashes)
+
+
 def drawLine(x1, y1, x2, y2, fill='black', lineWidth=2, opacity=100,
              rotateAngle=0, dashes=False, arrowStart=False, arrowEnd=False,
              visible=True):
@@ -1114,40 +1752,55 @@ def drawLine(x1, y1, x2, y2, fill='black', lineWidth=2, opacity=100,
         _number(value, name)
     if lineWidth < 0:
         raise ValueError('lineWidth must be >= 0')
-    _checkCommon(opacity, dashes)
-    if arrowStart or arrowEnd:
-        raise ValueError('arrows are not supported on the EyePi yet')
+    dashes = _checkCommon(opacity, dashes)
     color = _fillColor(fill, opacity, runtime.background)
     if not visible or color is None or lineWidth <= 0:
         return
     renderer = runtime.renderer
     half = lineWidth / 2
-    if rotateAngle % 360 == 0:
-        if y1 == y2:
-            _rect(renderer, min(x1, x2), y1 - half, abs(x2 - x1), lineWidth,
-                  color)
-            return
-        if x1 == x2:
-            _rect(renderer, x1 - half, min(y1, y2), lineWidth, abs(y2 - y1),
-                  color)
-            return
+    rotated = rotateAngle % 360 != 0
+    if dashes is not None:
+        if (x1, y1) != (x2, y2):
+            ends = _rotate([(x1, y1), (x2, y2)], (x1 + x2) / 2,
+                           (y1 + y2) / 2, rotateAngle)
+            _stroke(renderer, ends, False, lineWidth, color, dashes)
+    elif not rotated and y1 == y2:
+        _rect(renderer, min(x1, x2), y1 - half, abs(x2 - x1), lineWidth,
+              color)
+    elif not rotated and x1 == x2:
+        _rect(renderer, x1 - half, min(y1, y2), lineWidth, abs(y2 - y1),
+              color)
     length = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
     if length == 0:
         return
-    nx = -(y2 - y1) / length * half
-    ny = (x2 - x1) / length * half
-    pts = [(x1 + nx, y1 + ny), (x2 + nx, y2 + ny),
-           (x2 - nx, y2 - ny), (x1 - nx, y1 - ny)]
-    pts = _rotate(pts, (x1 + x2) / 2, (y1 + y2) / 2, rotateAngle)
-    renderer.polygon(_intPoints(pts), color)
+    dx = (x2 - x1) / length
+    dy = (y2 - y1) / length
+    cx = (x1 + x2) / 2
+    cy = (y1 + y2) / 2
+    if dashes is None and (rotated or (y1 != y2 and x1 != x2)):
+        nx = -dy * half
+        ny = dx * half
+        pts = [(x1 + nx, y1 + ny), (x2 + nx, y2 + ny),
+               (x2 - nx, y2 - ny), (x1 - nx, y1 - ny)]
+        _fill(renderer, _rotate(pts, cx, cy, rotateAngle), color)
+    # Arrowheads: the same size as desktop CMU's.
+    arrowLength = min(50, 10 * math.sqrt(lineWidth))
+    arrowWidth = arrowLength / 3
+    for on, x, y, way in ((arrowEnd, x2, y2, -1), (arrowStart, x1, y1, 1)):
+        if on:
+            bx = x + way * arrowLength * dx
+            by = y + way * arrowLength * dy
+            pts = [(x, y), (bx + arrowWidth * dy, by - arrowWidth * dx),
+                   (bx - arrowWidth * dy, by + arrowWidth * dx)]
+            _fill(renderer, _rotate(pts, cx, cy, rotateAngle), color)
 
 
 def drawLabel(value, centerX, centerY, fill='black', border=None,
               borderWidth=2, opacity=100, rotateAngle=0, dashes=False,
               align='center', visible=True, size=12, font='arial',
               bold=False, italic=False):
-    # font, bold, italic and border are accepted for desktop compatibility;
-    # the EyePi has one built-in font.
+    # font, bold, italic, border and dashes are accepted for desktop
+    # compatibility; the EyePi has one built-in font and no text outlines.
     runtime = _checkView('drawLabel')
     for v, name in ((centerX, 'centerX'), (centerY, 'centerY'),
                     (size, 'size'), (rotateAngle, 'rotateAngle')):

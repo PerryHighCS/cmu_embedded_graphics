@@ -15,6 +15,8 @@ from cmu_embedded_graphics import (MVCError, drawCircle, drawLabel, drawLine,
 class FakeDisplay:
     def __init__(self):
         self.rotation = 180
+        self.brightness = 1.0
+        self.brightnesses = []
         self.root_group = None
         self.auto_refresh = False
         self.refreshes = 0
@@ -23,6 +25,7 @@ class FakeDisplay:
     def refresh(self):
         self.refreshes += 1
         self.rotations.append(self.rotation)
+        self.brightnesses.append(self.brightness)
 
 
 class FakeKeys:
@@ -250,6 +253,10 @@ def test_app_defaults_and_read_only():
     ('rotation', 90.0, TypeError),
     ('rotation', '90', TypeError),
     ('background', 'notacolor', ValueError),
+    ('brightness', 101, ValueError),
+    ('brightness', -1, ValueError),
+    ('brightness', 'dim', TypeError),
+    ('brightness', True, TypeError),
 ])
 def test_app_setter_errors(name, value, exc):
     def onAppStart(app):
@@ -413,8 +420,13 @@ def test_draw_line():
     assert isinstance(flat, vectorio.Rectangle)
     assert (flat.x, flat.y, flat.width, flat.height) == (10, 49, 100, 2)
     assert isinstance(diag, vectorio.Polygon) and len(diag.points) == 4
-    with pytest.raises(ValueError, match='arrows'):
-        draw(lambda: drawLine(0, 0, 10, 10, arrowEnd=True))
+    d = draw(lambda: drawLine(10, 50, 110, 50, arrowEnd=True,
+                              arrowStart=True, lineWidth=4))
+    body, end, start = shapes(d)
+    assert isinstance(body, vectorio.Rectangle)
+    assert end.points[0] == (110, 50) and start.points[0] == (10, 50)
+    # Desktop size: length min(50, 10*sqrt(lineWidth)) = 20, half-width 20/3.
+    assert sorted(end.points) == [(90, 43), (90, 57), (110, 50)]
 
 
 def test_draw_label():
@@ -450,7 +462,11 @@ def test_opacity_blends_with_background():
     (lambda: drawRect(0, 0, 1, 1, fill='nope'), ValueError),
     (lambda: drawRect(0, 0, 1, 1, align='middle'), ValueError),
     (lambda: drawRect(0, 0, 1, 1, opacity=150), ValueError),
-    (lambda: drawRect(0, 0, 1, 1, dashes=True), ValueError),
+    (lambda: drawRect(0, 0, 1, 1, dashes='yes'), TypeError),
+    (lambda: drawRect(0, 0, 1, 1, dashes=[]), TypeError),
+    (lambda: drawRect(0, 0, 1, 1, dashes=[4, -1]), ValueError),
+    (lambda: drawRect(0, 0, 1, 1, dashes=[0, 0]), ValueError),
+    (lambda: drawLine(0, 0, 9, 9, dashes=[True, 2]), ValueError),
     (lambda: drawRect(0, 0, 1, 1, borderWidth=-1), ValueError),
     (lambda: drawCircle(0, 0, -5), ValueError),
     (lambda: drawLabel('x', 0, 0, size=0), ValueError),
@@ -835,19 +851,14 @@ def test_transparent_color_on_24bit_uses_converter(tmp_path):
     assert shader.transparent == {0x00FF00}
 
 
-def test_eye_example_poses_fit_by_swapping_overlays(monkeypatch, capsys):
+def test_eye_example_blinks_with_both_images_in_memory(monkeypatch, capsys):
     import os
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     monkeypatch.chdir(os.path.join(root, 'examples', 'eye'))
-    # Room for open.bmp plus two overlays, not all three (~150 KB board).
-    ceg.displayio.Bitmap.budget = 240 * 240 + 260 * 165 + 260 * 156
+    ceg.displayio.Bitmap.budget = 240 * 240 + 260 * 165
     source = open('code.py').read().replace('runApp()', '')
     g = {'__name__': 'eye'}
     exec(compile(source, 'code.py', 'exec'), g)
-    loads = []
-    real = ceg._loadImage
-    monkeypatch.setattr(ceg, '_loadImage', lambda p, ram: loads.append(
-        (os.path.basename(p), ram)) or real(p, ram))
     frames = []
 
     def redrawAll(app):
@@ -861,28 +872,422 @@ def test_eye_example_poses_fit_by_swapping_overlays(monkeypatch, capsys):
 
     def onStep(app):
         g['onStep'](app)
-        if app.elapsedTime > 2:
+        if app.elapsedTime > 4:
             app.stop()
 
-    keys = [['space'], ['left'], ['right'], ['space'], ['left']]
-    batches = []
-    for k in keys:
-        batches += [k] + [[]] * 100
     supervisor.autoAdvance = 1
     ns = types.SimpleNamespace(onAppStart=g['onAppStart'], onStep=onStep,
                                onKeyPress=g['onKeyPress'],
                                redrawAll=redrawAll)
-    ceg._run(ns, FakeDisplay(), [FakeKeys(batches)])
+    ceg._run(ns, FakeDisplay(), [FakeKeys([['space']])])
     opened = ('open.bmp', 'Bitmap', 0, 0, [])
-    overlays = [f[1][:2] for f in frames if len(f) == 2]
-    shown = [o for i, o in enumerate(overlays) if i == 0 or o != overlays[i - 1]]
-    assert shown == [('closedsm.bmp', 'Bitmap'), ('leftsm.bmp', 'Bitmap'),
-                     ('rightsm.bmp', 'Bitmap'), ('closedsm.bmp', 'Bitmap'),
-                     ('leftsm.bmp', 'Bitmap')]
-    assert all(f[0] == opened for f in frames)
-    assert ('rightsm.bmp', 'Bitmap', -10, 42, [254]) in [
-        f[1] for f in frames if len(f) == 2]
-    # Never fell back to the slow file drawing; overlays were reloaded.
-    assert all(ram for _, ram in loads)
-    assert loads.count(('closedsm.bmp', True)) >= 2
-    assert 'drawImage: not enough memory' not in capsys.readouterr().out
+    shut = ('closedsm.bmp', 'Bitmap', -10, 38, [254])
+    assert frames[0] == (opened,)
+    assert (opened, shut) in frames            # blinked, overlay keyed
+    assert all(f in ((opened,), (opened, shut)) for f in frames)
+    assert 'not enough memory' not in capsys.readouterr().out
+
+
+
+# ------------------------------------------------------ Phase 2 shapes
+
+from cmu_embedded_graphics import (drawArc, drawOval, drawPolygon,
+                                   drawRegularPolygon, drawStar, gradient,
+                                   runAppWithScreens, setActiveScreen)
+
+
+def raster(points):
+    # Pixels vectorio fills for a polygon: its winding-number test
+    # (shared-module/vectorio/Polygon.c), over the polygon's box.
+    xs = [x for x, y in points]
+    ys = [y for x, y in points]
+    out = set()
+    n = len(points)
+    for y in range(min(ys), max(ys) + 1):
+        for x in range(min(xs), max(xs) + 1):
+            w = 0
+            for i in range(n):
+                x1, y1 = points[i]
+                x2, y2 = points[(i + 1) % n]
+                side = (x2 - x1) * (y - y1) - (x - x1) * (y2 - y1)
+                if y1 <= y:
+                    if y2 > y and side > 0:
+                        w += 1
+                elif y2 <= y and side < 0:
+                    w -= 1
+            if w:
+                out.add((x, y))
+    return out
+
+
+def polygons(item):
+    if isinstance(item, vectorio.Polygon):
+        return [item] if not item.hidden else []
+    return [p for p in item.items if not p.hidden]
+
+
+@pytest.mark.parametrize('pts', [
+    [(20, 20), (220, 40), (200, 220), (30, 180)],             # convex
+    [(120, 10), (150, 110), (230, 120), (150, 130), (120, 230),
+     (90, 130), (10, 120), (90, 110)],                        # concave star
+])
+def test_band_split_fill_matches_one_polygon(pts):
+    pieces = ceg._fillPieces(pts)
+    assert len(pieces) > 1
+    whole = raster(ceg._intPoints(pts))
+    union = set()
+    for piece in pieces:
+        cover = raster(piece)
+        assert not (cover & union)          # no pixel drawn twice
+        union |= cover
+    # Rounding where strips cut a slanted edge can move that edge by under
+    # a pixel, so differences may only sit on the outline: no holes.
+    for x, y in union ^ whole:
+        near = [(x + dx, y + dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)]
+        assert any(p in whole for p in near)
+        assert any(p not in whole for p in near)
+    assert len(union ^ whole) < 0.02 * len(whole)
+
+
+def test_small_fill_is_one_polygon():
+    assert len(ceg._fillPieces([(0, 0), (20, 0), (10, 20)])) == 1
+
+
+def test_draw_oval():
+    d = draw(lambda: drawOval(120, 120, 60, 60, fill='red'))
+    circle, = shapes(d)
+    assert isinstance(circle, vectorio.Circle) and circle.radius == 30
+    d = draw(lambda: drawOval(120, 120, 200, 100, fill='red'))
+    oval, = shapes(d)
+    cover = set()
+    for p in polygons(oval):
+        cover |= raster(p.points)
+    xs = [x for x, y in cover]
+    ys = [y for x, y in cover]
+    assert (min(xs), max(xs), min(ys), max(ys)) == (20, 219, 70, 169)
+    d = draw(lambda: drawOval(0, 0, 40, 20, fill='red', align='left-top'))
+    oval, = shapes(d)
+    xs = [x for p in polygons(oval) for x, y in p.points]
+    assert min(xs) == 0 and max(xs) == 40
+
+
+def test_draw_oval_rotated_and_outlined():
+    d = draw(lambda: drawOval(120, 120, 100, 40, fill=None, border='blue',
+                              borderWidth=4, rotateAngle=90))
+    ring, = shapes(d)
+    pts = [pt for p in polygons(ring) for pt in p.points]
+    xs = [x for x, y in pts]
+    ys = [y for x, y in pts]
+    assert (min(xs), max(xs)) == (98, 142) and (min(ys), max(ys)) == (68, 172)
+    # Every piece is small: no big boxes for vectorio to test.
+    for p in polygons(ring):
+        px = [x for x, y in p.points]
+        py = [y for x, y in p.points]
+        assert (max(px) - min(px)) * (max(py) - min(py)) * len(p.points) \
+            <= ceg.FILL_BUDGET
+
+
+def test_draw_arc_angles_counterclockwise_from_east():
+    d = draw(lambda: drawArc(100, 100, 80, 40, 0, 90, fill='red'))
+    wedge, = shapes(d)
+    pts = wedge.points
+    assert pts[0] == (100, 100)            # pie slice from the center
+    assert pts[1] == (140, 100)            # 0 degrees: 3 o'clock
+    assert pts[-1] == (100, 80)            # 90 degrees: 12 o'clock
+    with pytest.raises(ValueError):
+        draw(lambda: drawArc(100, 100, 80, 40, 0, 400))
+    assert shapes(draw(lambda: drawArc(100, 100, 80, 40, 0, 0))) == []
+
+
+def test_draw_polygon():
+    d = draw(lambda: drawPolygon(10, 10, 50, 10, 30, 40, fill='green'))
+    tri, = shapes(d)
+    assert tri.points == [(10, 10), (50, 10), (30, 40)]
+    assert tri.color == 0x008000
+    with pytest.raises(ValueError):
+        draw(lambda: drawPolygon(10, 10, 50))
+    with pytest.raises(TypeError):
+        draw(lambda: drawPolygon(10, 10, 50, 'x', 30, 40))
+    with pytest.raises(TypeError):
+        draw(lambda: drawPolygon(10, 10, 50, 10, 30, 40, align='center'))
+    # Rotated about its centroid (30, 20): a 180 degree turn flips it.
+    d = draw(lambda: drawPolygon(10, 10, 50, 10, 30, 40, rotateAngle=180))
+    tri, = shapes(d)
+    assert sorted(tri.points) == sorted([(50, 30), (10, 30), (30, 0)])
+
+
+def test_draw_regular_polygon_and_star():
+    d = draw(lambda: drawRegularPolygon(100, 100, 30, 4, fill='red'))
+    sq, = shapes(d)
+    assert sq.points == [(100, 70), (130, 100), (100, 130), (70, 100)]
+    d = draw(lambda: drawStar(100, 100, 25, 5, fill='gold'))
+    star, = shapes(d)
+    pts = star.points
+    assert len(pts) == 10 and pts[0] == (100, 75)
+    inner = ceg.distance(100, 100, *pts[1])
+    assert abs(inner - 25 * 0.38196601125) < 1
+    d = draw(lambda: drawStar(100, 100, 20, 6, roundness=80, fill='gold'))
+    star, = shapes(d)
+    assert abs(ceg.distance(100, 100, *star.points[1]) - 16) < 1
+    for bad in (dict(points=2), dict(points=2.5)):
+        with pytest.raises((ValueError, TypeError)):
+            draw(lambda: drawStar(100, 100, 50, **bad))
+    with pytest.raises(ValueError):
+        draw(lambda: drawStar(100, 100, 50, 5, roundness=150))
+
+
+def test_star_border_mitered_and_capped():
+    d = draw(lambda: drawStar(120, 120, 60, 5, fill=None, border='red',
+                              borderWidth=6))
+    ring, = shapes(d)
+    pts = [pt for p in polygons(ring) for pt in p.points]
+    far = max(ceg.distance(120, 120, x, y) for x, y in pts)
+    # Tip miter, capped at 4 border widths past the tip.
+    assert 60 < far <= 60 + 4 * 6 + 1
+
+
+def test_rotated_rect_align_uses_box_after_rotation():
+    d = draw(lambda: drawRect(0, 0, 40, 40, rotateAngle=45))
+    poly, = shapes(d)
+    xs = [x for x, y in poly.points]
+    assert (min(xs), max(xs)) == (-8, 48)      # turned about its center
+    d = draw(lambda: drawRect(0, 0, 40, 40, rotateAngle=45,
+                              align='left-top'))
+    poly, = shapes(d)
+    xs = [x for x, y in poly.points]
+    ys = [y for x, y in poly.points]
+    assert (min(xs), min(ys)) == (0, 0)
+
+
+def test_gradient_draws_first_color():
+    g = gradient('red', 'blue', start='left')
+    assert ceg._toColor(g) == 0xFF0000
+    d = draw(lambda: drawRect(0, 0, 10, 10, fill=gradient('lime', 'navy')))
+    assert shapes(d)[0].color == 0x00FF00
+    for args in (('red',), ('red', None), ('red', 'blue', 'x')):
+        with pytest.raises(ValueError):
+            gradient(*args[:2]) if len(args) < 3 else gradient(
+                'red', 'blue', start='middle')
+
+
+def test_math_helpers_match_desktop():
+    assert ceg.angleTo(0, 0, 10, 0) == 90
+    assert ceg.angleTo(0, 0, 0, 10) == 180
+    x, y = ceg.getPointInDir(0, 0, 90, 10)
+    assert (pythonRound(x, 6), pythonRound(y, 6)) == (10, 0)
+    assert ceg.rounded(2.5) == 3 and ceg.rounded(-2.5) == -3
+    assert ceg.pythonRound(2.5) == 2
+    with pytest.raises(Exception, match='rounded'):
+        ceg.round(2.5)
+    assert ceg.distance(0, 0, 3, 4) == 5
+    assert ceg.makeList(2, 3, 0) == [[0, 0, 0], [0, 0, 0]]
+    assert ceg.almostEqual(0.1 + 0.2, 0.3)
+    assert abs(ceg.dsin(30) - 0.5) < 1e-9
+    assert abs(ceg.fromPythonAngle(ceg.toPythonAngle(30)) - 30) < 1e-9
+    for name in ('choice', 'random', 'randrange', 'seed'):
+        assert name in ceg.__all__
+
+
+pythonRound = ceg.pythonRound
+
+
+def test_app_quit_stops():
+    run(onAppStart=lambda app: app.quit())
+
+
+# -------------------------------------------------------------- Screens
+
+def runScreens(initial, inputs=(), **callbacks):
+    ns = types.SimpleNamespace(**callbacks)
+    ceg._run(ns, FakeDisplay(), [FakeKeys(inputs)], screen=initial)
+
+
+def test_screens_switch_and_activate():
+    log = []
+
+    def onAppStart(app):
+        app.stepsPerSecond = 0
+        log.append('start')
+
+    def title_onScreenActivate(app):
+        log.append('title active')
+
+    def title_redrawAll(app):
+        log.append('title draw')
+
+    def title_onKeyPress(app, key):
+        setActiveScreen('game')
+
+    def game_onScreenActivate(app):
+        log.append('game active')
+
+    def game_redrawAll(app):
+        log.append('game draw')
+
+    def game_onKeyPress(app, key):
+        app.stop()
+
+    runScreens('title', [['x'], ['y']], onAppStart=onAppStart,
+               title_onScreenActivate=title_onScreenActivate,
+               title_redrawAll=title_redrawAll,
+               title_onKeyPress=title_onKeyPress,
+               game_onScreenActivate=game_onScreenActivate,
+               game_redrawAll=game_redrawAll,
+               game_onKeyPress=game_onKeyPress)
+    assert log == ['start', 'title active', 'title draw', 'game active',
+                   'game draw', 'game draw']
+
+
+def test_screen_errors():
+    with pytest.raises(MVCError, match='Do not define onStep'):
+        runScreens('a', a_redrawAll=lambda app: None, onStep=lambda app: 0)
+    with pytest.raises(ValueError, match="requires 'b_redrawAll"):
+        runScreens('b', a_redrawAll=lambda app: None)
+    with pytest.raises(MVCError, match='event functions only'):
+        runScreens('a', a_redrawAll=lambda app: setActiveScreen('a'))
+    with pytest.raises(MVCError, match='no mouse'):
+        runScreens('a', a_redrawAll=lambda app: None,
+                   a_onMousePress=lambda app, x, y: None)
+    with pytest.raises(MVCError):
+        setActiveScreen('a')
+
+
+def test_on_device_shapes_test_runs_both_screens():
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(root, 'tests', 'test_shapes.py')
+    source = open(path).read().replace("runAppWithScreens('basic')", '')
+    g = {'__name__': 'shapes'}
+    exec(compile(source, path, 'exec'), g)
+    drawn = []
+    calls = []
+
+    def basic_onKeyPress(app, key):
+        g['basic_onKeyPress'](app, key)
+        calls.append(key)
+        if len(calls) == 3:
+            app.stop()
+
+    def wrap(name):
+        def redrawAll(app):
+            g[name](app)
+            drawn.append((name, ceg._runtime.renderer.count))
+        return redrawAll
+
+    ns = types.SimpleNamespace(
+        onAppStart=g['onAppStart'], basic_onKeyPress=basic_onKeyPress,
+        more_onKeyPress=g['more_onKeyPress'],
+        dashes_onKeyPress=g['dashes_onKeyPress'],
+        basic_redrawAll=wrap('basic_redrawAll'),
+        more_redrawAll=wrap('more_redrawAll'),
+        dashes_redrawAll=wrap('dashes_redrawAll'))
+    d = FakeDisplay()
+    keys = [['r'], ['space'], ['space'], ['space'], ['x']]
+    ceg._run(ns, d, [FakeKeys(keys)], screen='basic')
+    names = [n for n, _ in drawn]
+    assert names == ['basic_redrawAll', 'basic_redrawAll', 'more_redrawAll',
+                     'dashes_redrawAll', 'basic_redrawAll',
+                     'basic_redrawAll']
+    assert d.rotations[-1] == 270             # 180 + one 'r'
+    assert max(count for _, count in drawn) < ceg.MAX_SHAPES
+
+
+def test_brightness_sets_backlight():
+    def onAppStart(app):
+        assert app.brightness == 100
+        app.brightness = 25
+        app.stepsPerSecond = 1000
+
+    def onStep(app):
+        app.brightness = 0
+        app.stop()
+
+    d = run(onAppStart=onAppStart, onStep=onStep)
+    assert d.brightnesses == [0.25, 0.0]
+
+
+
+# --------------------------------------------------------------- Dashes
+
+def test_dash_patterns_and_intervals():
+    assert ceg._dashPattern(True) == [5, 5]
+    assert ceg._dashPattern(False) is None
+    assert ceg._dashPattern([4]) == [4, 4]
+    assert ceg._dashPattern((6, 2, 1)) == [6, 2, 1, 6, 2, 1]
+    assert ceg._dashIntervals(30, [5, 5]) == [(0, 5), (10, 15), (20, 25)]
+    assert ceg._dashIntervals(12, [5, 5]) == [(0, 5), (10, 12)]
+    assert ceg._dashIntervals(10, [0, 3]) == []
+
+
+def test_dashed_line():
+    d = draw(lambda: drawLine(0, 10, 30, 10, lineWidth=4, dashes=True))
+    group, = shapes(d)
+    boxes = []
+    for p in polygons(group):
+        xs = [x for x, y in p.points]
+        ys = [y for x, y in p.points]
+        boxes.append((min(xs), max(xs), min(ys), max(ys)))
+    assert boxes == [(0, 5, 8, 12), (10, 15, 8, 12), (20, 25, 8, 12)]
+    # Arrowheads stay solid, as on desktop.
+    d = draw(lambda: drawLine(0, 10, 60, 10, dashes=True, arrowEnd=True))
+    dashes, arrow = shapes(d)
+    assert isinstance(arrow, vectorio.Polygon) and arrow.points[0] == (60, 10)
+
+
+def test_dashed_rect_border_keeps_corners():
+    d = draw(lambda: drawRect(20, 20, 40, 30, fill='red', border='blue',
+                              borderWidth=4, dashes=[50, 10]))
+    body, group = shapes(d)
+    assert (body.x, body.y, body.width, body.height) == (20, 20, 40, 30)
+    pieces = polygons(group)
+    # Perimeter 140, 50 on / 10 off: dashes 0-50, 60-110, 120-140.
+    assert len(pieces) == 3
+    # The first dash runs along the top (40) and turns the top-right
+    # corner: its outer corner is mitered at (62, 18).
+    assert (62, 18) in pieces[0].points
+    assert len(pieces[0].points) == 6
+    # The second starts on the right edge (at 60 of 40..70) and turns the
+    # bottom-right corner (62, 52).
+    assert (62, 52) in pieces[1].points
+    ring = set()
+    for p in polygons(shapes(draw(lambda: drawRect(
+            20, 20, 40, 30, fill=None, border='blue', borderWidth=4)))[0]):
+        ring |= raster(p.points)
+    dashed = set()
+    for p in pieces:
+        dashed |= raster(p.points)
+    assert dashed <= ring and 0.7 < len(dashed) / len(ring) < 0.95
+
+
+def test_dashed_circle_and_shapes():
+    d = draw(lambda: drawCircle(120, 120, 50, fill=None, border='white',
+                                dashes=True))
+    group, = shapes(d)
+    # Perimeter ~314 in 10 px steps.
+    assert 30 <= len(polygons(group)) <= 33
+    d = draw(lambda: drawCircle(120, 120, 50, fill='red', border='white',
+                                dashes=True))
+    disk, group = shapes(d)
+    assert isinstance(disk, vectorio.Circle) and disk.radius == 50
+    for fn in (lambda: drawOval(120, 120, 100, 60, dashes=True,
+                                border='red'),
+               lambda: drawStar(120, 120, 40, 5, border='red', dashes=[3]),
+               lambda: drawArc(120, 120, 80, 80, 0, 270, border='red',
+                               dashes=True),
+               lambda: drawPolygon(10, 10, 90, 20, 50, 80, border='red',
+                                   fill=None, dashes=True),
+               lambda: drawRect(60, 60, 50, 30, rotateAngle=30,
+                                border='red', dashes=True)):
+        d = draw(fn)
+        assert isinstance(shapes(d)[-1], ceg.displayio.Group)
+    # Labels accept dashes and ignore them, like font and bold.
+    assert len(shapes(draw(lambda: drawLabel('hi', 50, 50,
+                                             dashes=True)))) == 1
+
+
+def test_dash_starting_on_a_corner_follows_the_next_edge():
+    d = draw(lambda: drawRect(20, 20, 40, 30, fill=None, border='blue',
+                              borderWidth=4, dashes=[30, 10]))
+    group, = shapes(d)
+    second = polygons(group)[1]          # 40-70: exactly the right edge
+    assert sorted(second.points) == [(58, 20), (58, 50), (62, 20), (62, 50)]
